@@ -1,7 +1,7 @@
 {
   "domain": "joule_sous_vide",
   "name": "ChefSteps Joule Sous Vide",
-  "after_dependencies": ["http"],
+  "after_dependencies": ["http", "frontend"],
   "codeowners": ["@catomaior"],
   "config_flow": true,
   "dependencies": [],
