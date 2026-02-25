@@ -111,7 +111,12 @@ async def test_async_setup_registers_static_path_when_http_available(
     mock_http = MagicMock()
     mock_http.async_register_static_paths = AsyncMock()
 
-    with patch.object(hass, "http", mock_http):
+    with (
+        patch.object(hass, "http", mock_http),
+        patch(
+            "custom_components.joule_sous_vide.add_extra_js_url",
+        ) as mock_add_js,
+    ):
         result = await async_setup(hass, {})
 
     assert result is True
@@ -121,6 +126,7 @@ async def test_async_setup_registers_static_path_when_http_available(
     static_config = args[0]
     assert static_config.url_path == LOVELACE_CARD_URL
     assert static_config.path.endswith("joule-card.js")
+    mock_add_js.assert_called_once_with(hass, LOVELACE_CARD_URL)
 
 
 async def test_async_setup_skips_static_path_when_http_unavailable(
@@ -129,10 +135,16 @@ async def test_async_setup_skips_static_path_when_http_unavailable(
     """async_setup returns True even when hass.http is None (e.g. in tests)."""
     from custom_components.joule_sous_vide import async_setup
 
-    with patch.object(hass, "http", None):
+    with (
+        patch.object(hass, "http", None),
+        patch(
+            "custom_components.joule_sous_vide.add_extra_js_url",
+        ) as mock_add_js,
+    ):
         result = await async_setup(hass, {})
 
     assert result is True
+    mock_add_js.assert_called_once_with(hass, LOVELACE_CARD_URL)
 
 
 async def test_unload_entry_state(

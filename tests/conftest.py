@@ -49,6 +49,15 @@ def _fast_notification_timeout(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(JouleCoordinator, "NOTIFICATION_TIMEOUT", 0.01)
 
 
+@pytest.fixture(autouse=True)
+def _mock_add_extra_js_url(monkeypatch: pytest.MonkeyPatch):
+    """Stub add_extra_js_url so tests don't need the frontend component."""
+    monkeypatch.setattr(
+        "custom_components.joule_sous_vide.add_extra_js_url",
+        lambda hass, url: None,
+    )
+
+
 @pytest.fixture
 async def setup_integration(
     hass: HomeAssistant,

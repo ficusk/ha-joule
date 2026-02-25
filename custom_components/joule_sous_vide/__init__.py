@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from homeassistant.components.frontend import add_extra_js_url
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -21,7 +22,7 @@ LOVELACE_CARD_URL = f"/{DOMAIN}/joule-card.js"
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register the Lovelace card as a static resource."""
+    """Register the Lovelace card as a static resource and frontend module."""
     if hass.http is not None:
         await hass.http.async_register_static_paths(
             [
@@ -32,6 +33,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 )
             ]
         )
+    add_extra_js_url(hass, LOVELACE_CARD_URL)
     return True
 
 

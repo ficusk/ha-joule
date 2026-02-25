@@ -37,28 +37,20 @@ Once set up, Home Assistant creates five entities for your Joule, all under a si
 
 [HACS](https://hacs.xyz) is the Home Assistant Community Store. It handles installation and updates automatically.
 
-**Step 1 — Install the integration**
-
 1. Make sure [HACS is installed](https://hacs.xyz/docs/use/).
 2. In Home Assistant, go to **HACS** → **Integrations**.
 3. Click **⋮** → **Custom repositories**, add `https://github.com/acato/ha-joule`, category **Integration**.
 4. Search for **ChefSteps Joule Sous Vide** and click **Download**.
 5. **Restart Home Assistant.**
 
-**Step 2 — Install the Lovelace card**
-
-1. In HACS, go to **Frontend**.
-2. Click **⋮** → **Custom repositories**, add `https://github.com/acato/ha-joule`, category **Frontend**.
-3. Search for **ChefSteps Joule Sous Vide** and click **Download**.
-4. **Reload the browser tab.**
-
-> The card is now available in the card picker. See [How To: Use the Custom Lovelace Card](docs/how-to-lovelace-card.md) for setup instructions.
+> The custom Lovelace card is bundled with the integration and registers itself automatically — no separate Frontend download needed. See [How To: Use the Custom Lovelace Card](docs/how-to-lovelace-card.md) for setup instructions.
 
 ### Method 2 — Manual
 
 1. Copy the `custom_components/joule_sous_vide/` folder into the `custom_components/` directory inside your HA configuration directory.
 2. **Restart Home Assistant.**
-3. The Lovelace card is served automatically — register `/joule_sous_vide/joule-card.js` as a Lovelace resource (JavaScript module) and reload the browser.
+
+> The Lovelace card is bundled and registers itself automatically on startup.
 
 ### Add the integration
 
@@ -159,7 +151,7 @@ Two `number` entities — **Target Temperature** and **Cook Time** (0–1440 min
 
 ### ~~2 — Custom Lovelace card~~ ✅ Done
 
-A `custom:joule-sous-vide-card` Lovelace card that shows current temperature, target temperature (with +/− steppers), cook time (with +/− steppers), a °F/°C unit toggle, and a Start/Stop button — all in one panel. The card is served automatically by the integration at `/joule_sous_vide/joule-card.js`; add it as a Lovelace resource and it appears in the card picker. See [How To: Use the Custom Lovelace Card](docs/how-to-lovelace-card.md).
+A `custom:joule-sous-vide-card` Lovelace card that shows current temperature, target temperature (with +/− steppers), cook time (with +/− steppers), a °F/°C unit toggle, and a Start/Stop button — all in one panel. The card is bundled with the integration and auto-registers as a frontend module via `add_extra_js_url` — no separate HACS Frontend download or manual resource registration needed. See [How To: Use the Custom Lovelace Card](docs/how-to-lovelace-card.md).
 
 ### ~~3 — HACS integration and install workflow~~ ✅ Done
 
