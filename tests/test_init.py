@@ -126,10 +126,11 @@ async def test_async_setup_registers_static_path_when_http_available(
 async def test_async_setup_registers_lovelace_resource(
     hass: HomeAssistant,
 ) -> None:
-    """async_setup adds the card to the Lovelace resource collection."""
+    """Resource is added to the Lovelace collection after HA has started."""
     from custom_components.joule_sous_vide import async_setup
 
     mock_resources = MagicMock()
+    mock_resources.loaded = True
     mock_resources.async_items.return_value = []
     mock_resources.async_create_item = AsyncMock()
     hass.data["lovelace"] = {"resources": mock_resources}
@@ -138,6 +139,10 @@ async def test_async_setup_registers_lovelace_resource(
         result = await async_setup(hass, {})
 
     assert result is True
+    # Registration is deferred — fire the event to trigger it.
+    hass.bus.async_fire("homeassistant_started")
+    await hass.async_block_till_done()
+
     mock_resources.async_create_item.assert_called_once_with(
         {"res_type": "module", "url": LOVELACE_CARD_URL}
     )
@@ -146,10 +151,11 @@ async def test_async_setup_registers_lovelace_resource(
 async def test_async_setup_skips_duplicate_lovelace_resource(
     hass: HomeAssistant,
 ) -> None:
-    """async_setup does not re-add the resource if it already exists."""
+    """Resource is not re-added if it already exists."""
     from custom_components.joule_sous_vide import async_setup
 
     mock_resources = MagicMock()
+    mock_resources.loaded = True
     mock_resources.async_items.return_value = [
         {"url": LOVELACE_CARD_URL, "res_type": "module"},
     ]
@@ -160,6 +166,9 @@ async def test_async_setup_skips_duplicate_lovelace_resource(
         result = await async_setup(hass, {})
 
     assert result is True
+    hass.bus.async_fire("homeassistant_started")
+    await hass.async_block_till_done()
+
     mock_resources.async_create_item.assert_not_called()
 
 

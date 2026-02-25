@@ -6,8 +6,8 @@ from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN
@@ -18,39 +18,64 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
 
 LOVELACE_CARD_URL = f"/{DOMAIN}/joule-card.js"
+LOVELACE_CARD_PATH = str(Path(__file__).parent / "www" / "joule-card.js")
 
 
 async def _register_lovelace_resource(hass: HomeAssistant) -> None:
-    """Add the card JS as a Lovelace resource if not already present."""
+    """Add the card JS as a Lovelace resource if not already present.
+
+    Must be called after the Lovelace resource collection has been loaded
+    from disk (i.e. after EVENT_HOMEASSISTANT_STARTED).
+    """
     try:
         resources = hass.data["lovelace"]["resources"]
         if resources is None:
             # YAML mode — user manages resources manually.
+            _LOGGER.debug(
+                "Lovelace is in YAML mode; skipping automatic resource registration"
+            )
             return
     except (KeyError, TypeError):
+        _LOGGER.debug("Lovelace resource collection not available")
         return
+
+    # Ensure the collection is loaded so the duplicate check is reliable.
+    if not resources.loaded:
+        await resources.async_load()
+        resources.loaded = True
 
     for item in resources.async_items():
         if item.get("url") == LOVELACE_CARD_URL:
-            return  # Already registered.
+            _LOGGER.debug("Lovelace resource %s already registered", LOVELACE_CARD_URL)
+            return
 
     await resources.async_create_item({"res_type": "module", "url": LOVELACE_CARD_URL})
-    _LOGGER.debug("Registered Lovelace resource %s", LOVELACE_CARD_URL)
+    _LOGGER.info("Registered Lovelace resource %s", LOVELACE_CARD_URL)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Register the Lovelace card as a static resource."""
+    # Serve the JS file at /joule_sous_vide/joule-card.js.
     if hass.http is not None:
-        await hass.http.async_register_static_paths(
-            [
-                StaticPathConfig(
-                    LOVELACE_CARD_URL,
-                    str(Path(__file__).parent / "www" / "joule-card.js"),
-                    cache_headers=False,
-                )
-            ]
-        )
-    await _register_lovelace_resource(hass)
+        if Path(LOVELACE_CARD_PATH).is_file():
+            await hass.http.async_register_static_paths(
+                [
+                    StaticPathConfig(
+                        LOVELACE_CARD_URL,
+                        LOVELACE_CARD_PATH,
+                        cache_headers=False,
+                    )
+                ]
+            )
+        else:
+            _LOGGER.warning("Card JS not found at %s", LOVELACE_CARD_PATH)
+
+    # Defer resource registration until HA is fully started so the Lovelace
+    # resource collection has been loaded from disk and dedup works correctly.
+    async def _on_ha_started(event: Event) -> None:
+        await _register_lovelace_resource(hass)
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
     return True
 
 

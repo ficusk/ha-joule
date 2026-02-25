@@ -55,8 +55,10 @@ def _mock_lovelace_resources(hass: HomeAssistant):
     from unittest.mock import AsyncMock
 
     fake_resources = MagicMock()
+    fake_resources.loaded = True
     fake_resources.async_items.return_value = []
     fake_resources.async_create_item = AsyncMock()
+    fake_resources.async_load = AsyncMock()
     hass.data["lovelace"] = {"resources": fake_resources}
 
 
