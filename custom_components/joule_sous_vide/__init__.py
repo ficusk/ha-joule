@@ -4,10 +4,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from homeassistant.components.frontend import (
-    DATA_EXTRA_MODULE_URL,
-    add_extra_js_url,
-)
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -24,8 +20,26 @@ PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SELECT, Platform.SENSOR, 
 LOVELACE_CARD_URL = f"/{DOMAIN}/joule-card.js"
 
 
+async def _register_lovelace_resource(hass: HomeAssistant) -> None:
+    """Add the card JS as a Lovelace resource if not already present."""
+    try:
+        resources = hass.data["lovelace"]["resources"]
+        if resources is None:
+            # YAML mode — user manages resources manually.
+            return
+    except (KeyError, TypeError):
+        return
+
+    for item in resources.async_items():
+        if item.get("url") == LOVELACE_CARD_URL:
+            return  # Already registered.
+
+    await resources.async_create_item({"res_type": "module", "url": LOVELACE_CARD_URL})
+    _LOGGER.debug("Registered Lovelace resource %s", LOVELACE_CARD_URL)
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register the Lovelace card as a static resource and frontend module."""
+    """Register the Lovelace card as a static resource."""
     if hass.http is not None:
         await hass.http.async_register_static_paths(
             [
@@ -36,8 +50,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 )
             ]
         )
-    hass.data.setdefault(DATA_EXTRA_MODULE_URL, set())
-    add_extra_js_url(hass, LOVELACE_CARD_URL)
+    await _register_lovelace_resource(hass)
     return True
 
 
