@@ -57,8 +57,10 @@ class JouleBLEAPI:
             )
             self._client = client
             _LOGGER.info("Connected to Joule at %s", self.mac_address)
-            # Dump discovered services for diagnostics
-            for service in client.services:
+            # Ensure services are discovered and dump for diagnostics
+            services = await client.get_services()
+            _LOGGER.debug("Discovered %d services", len(services.services))
+            for service in services:
                 _LOGGER.debug("Service: %s", service.uuid)
                 for char in service.characteristics:
                     props = ", ".join(char.properties)
