@@ -103,8 +103,10 @@ class JouleBLEAPI:
             "BLE WRITE to %s (%d bytes): %s", WRITE_CHAR_UUID, len(payload), payload.hex()
         )
         try:
+            # The WRITE characteristic (4322) only supports "write" (write-with-response),
+            # NOT "write-without-response", so response=True is required.
             await self._client.write_gatt_char(
-                WRITE_CHAR_UUID, bytearray(payload), response=False
+                WRITE_CHAR_UUID, bytearray(payload), response=True
             )
         except BleakError as err:
             raise JouleBLEError("Failed to write message to Joule") from err
@@ -130,34 +132,6 @@ class JouleBLEAPI:
         ``callback`` is called with ``(characteristic, data)`` for each notification.
         """
         try:
-            notify_chars = []
-            for service in self._client.services:
-                for char in service.characteristics:
-                    if "notify" in char.properties or "indicate" in char.properties:
-                        notify_chars.append(char)
-
-            _LOGGER.warning(
-                "Found %d notify/indicate characteristics: %s",
-                len(notify_chars),
-                [c.uuid for c in notify_chars],
-            )
-
-            # Subscribe to all notify-capable characteristics
-            for char in notify_chars:
-                if char.uuid != SUBSCRIBE_CHAR_UUID:
-                    _LOGGER.warning(
-                        "Subscribing to %s (diagnostic)", char.uuid
-                    )
-                    await self._client.start_notify(
-                        char.uuid,
-                        lambda c, d: _LOGGER.warning(
-                            "NOTIFY on %s: %d bytes, raw=%s",
-                            c.uuid if hasattr(c, "uuid") else c,
-                            len(d),
-                            d.hex(),
-                        ),
-                    )
-
             _LOGGER.warning("Subscribing to primary %s", SUBSCRIBE_CHAR_UUID)
             await self._client.start_notify(SUBSCRIBE_CHAR_UUID, callback)
             _LOGGER.warning("Subscribe complete")
