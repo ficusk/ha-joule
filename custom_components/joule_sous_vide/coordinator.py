@@ -60,7 +60,6 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._latest_data_point: CirculatorDataPoint | None = None
         self._notification_received: asyncio.Event = asyncio.Event()
         self._subscribed: bool = False
-        self._paired: bool = False
 
         super().__init__(
             hass,
@@ -143,13 +142,17 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if reconnected:
                 _LOGGER.warning("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
-                self._paired = False
 
-            # Attempt pairing on first connection (may be required before
-            # the device processes application-layer commands)
-            if not self._paired:
-                await self.api.pair()
-                self._paired = True
+                # Read GAP Device Name for diagnostics
+                gap_name = await self.api.read_characteristic(
+                    "00002a00-0000-1000-8000-00805f9b34fb"
+                )
+                if gap_name:
+                    _LOGGER.warning(
+                        "GAP Device Name: %s (hex: %s)",
+                        gap_name.decode("utf-8", errors="replace"),
+                        gap_name.hex(),
+                    )
 
             if not self._subscribed:
                 _LOGGER.warning("Subscribing to notifications")
