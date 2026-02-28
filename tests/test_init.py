@@ -1,5 +1,4 @@
 """Tests for integration setup and teardown (__init__.py)."""
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,7 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.joule_sous_vide.const import DOMAIN
 from custom_components.joule_sous_vide.coordinator import JouleCoordinator
 from custom_components.joule_sous_vide.joule_ble import JouleBLEError
-from custom_components.joule_sous_vide import LOVELACE_CARD_URL
+from custom_components.joule_sous_vide import LOVELACE_LOCAL_URL
 
 from .conftest import TEST_ENTRY_ID
 
@@ -102,25 +101,19 @@ async def test_unload_entry_removes_coordinator_from_hass_data(
     assert TEST_ENTRY_ID not in hass.data.get(DOMAIN, {})
 
 
-async def test_async_setup_registers_static_path_when_http_available(
+async def test_async_setup_copies_card_to_www(
     hass: HomeAssistant,
 ) -> None:
-    """async_setup registers the Lovelace card JS at LOVELACE_CARD_URL."""
+    """async_setup copies the card JS to the www/ directory."""
     from custom_components.joule_sous_vide import async_setup
 
-    mock_http = MagicMock()
-    mock_http.async_register_static_paths = AsyncMock()
-
-    with patch.object(hass, "http", mock_http):
+    with patch(
+        "custom_components.joule_sous_vide._copy_card_to_www"
+    ) as mock_copy:
         result = await async_setup(hass, {})
 
     assert result is True
-    mock_http.async_register_static_paths.assert_called_once()
-    args = mock_http.async_register_static_paths.call_args[0][0]
-    assert len(args) == 1
-    static_config = args[0]
-    assert static_config.url_path == LOVELACE_CARD_URL
-    assert static_config.path.endswith("joule-card.js")
+    mock_copy.assert_called_once_with(hass)
 
 
 async def test_async_setup_registers_lovelace_resource(
@@ -144,7 +137,7 @@ async def test_async_setup_registers_lovelace_resource(
     await hass.async_block_till_done()
 
     mock_resources.async_create_item.assert_called_once_with(
-        {"res_type": "module", "url": LOVELACE_CARD_URL}
+        {"res_type": "module", "url": LOVELACE_LOCAL_URL}
     )
 
 
@@ -157,7 +150,7 @@ async def test_async_setup_skips_duplicate_lovelace_resource(
     mock_resources = MagicMock()
     mock_resources.loaded = True
     mock_resources.async_items.return_value = [
-        {"url": LOVELACE_CARD_URL, "res_type": "module"},
+        {"url": LOVELACE_LOCAL_URL, "res_type": "module"},
     ]
     mock_resources.async_create_item = AsyncMock()
     hass.data["lovelace"] = {"resources": mock_resources}
