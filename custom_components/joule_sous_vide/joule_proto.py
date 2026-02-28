@@ -31,6 +31,7 @@ FIELD_START_PROGRAM_REQUEST = 50
 FIELD_STOP_CIRCULATOR_REQUEST = 60
 FIELD_BEGIN_LIVE_FEED_REQUEST = 70
 FIELD_CIRCULATOR_DATA_POINT = 90
+FIELD_IDENTIFY_CIRCULATOR_REQUEST = 152
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +188,11 @@ class StopCirculatorRequest:
 
 
 @dataclass
+class IdentifyCirculatorRequest:
+    """Identify/handshake with the circulator (empty body)."""
+
+
+@dataclass
 class BeginLiveFeedRequest:
     """Request a live data feed from the device."""
 
@@ -219,6 +225,7 @@ class StreamMessage:
     stop_circulator_request: StopCirculatorRequest | None = None  # field 60
     begin_live_feed_request: BeginLiveFeedRequest | None = None  # field 70
     circulator_data_point: CirculatorDataPoint | None = None  # field 90
+    identify_circulator_request: IdentifyCirculatorRequest | None = None  # field 152
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +249,13 @@ def encode_start_program_request(request: StartProgramRequest) -> bytes:
 
 def encode_stop_circulator_request(_request: StopCirculatorRequest) -> bytes:
     """Encode a StopCirculatorRequest (empty body)."""
+    return b""
+
+
+def encode_identify_circulator_request(
+    _request: IdentifyCirculatorRequest,
+) -> bytes:
+    """Encode an IdentifyCirculatorRequest (empty body)."""
     return b""
 
 
@@ -270,6 +284,11 @@ def encode_stream_message(message: StreamMessage) -> bytes:
     elif message.begin_live_feed_request is not None:
         inner = encode_begin_live_feed_request(message.begin_live_feed_request)
         result += encode_field_bytes(FIELD_BEGIN_LIVE_FEED_REQUEST, inner)
+    elif message.identify_circulator_request is not None:
+        inner = encode_identify_circulator_request(
+            message.identify_circulator_request
+        )
+        result += encode_field_bytes(FIELD_IDENTIFY_CIRCULATOR_REQUEST, inner)
 
     return result
 
@@ -355,6 +374,19 @@ def build_stop_cook_message(
         sender_address=sender,
         recipient_address=recipient,
         stop_circulator_request=StopCirculatorRequest(),
+    )
+    return encode_stream_message(msg)
+
+
+def build_identify_circulator_message(
+    sender: bytes = _DEFAULT_ADDRESS,
+    recipient: bytes = _DEFAULT_ADDRESS,
+) -> bytes:
+    """Build a serialized StreamMessage containing an IdentifyCirculatorRequest."""
+    msg = StreamMessage(
+        sender_address=sender,
+        recipient_address=recipient,
+        identify_circulator_request=IdentifyCirculatorRequest(),
     )
     return encode_stream_message(msg)
 

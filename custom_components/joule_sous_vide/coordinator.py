@@ -18,12 +18,15 @@ from .const import (
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_TEMPERATURE_UNIT,
     DOMAIN,
+    FILE_CHAR_UUID,
+    READ_CHAR_UUID,
     SUBSCRIBE_CHAR_UUID,
 )
 from .joule_ble import JouleBLEAPI, JouleBLEError
 from .joule_proto import (
     CirculatorDataPoint,
     ProgramStep,
+    build_identify_circulator_message,
     build_live_feed_message,
     build_start_cook_message,
     build_stop_cook_message,
@@ -84,11 +87,33 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             _LOGGER.warning("Notification did not contain a CirculatorDataPoint")
 
+    async def _try_write_and_wait(
+        self, label: str, payload: bytes, timeout: float,
+        *, use_file_char: bool = False,
+    ) -> bool:
+        """Write a payload and wait for a notification. Returns True if received."""
+        _LOGGER.warning(
+            "%s (%d bytes): %s", label, len(payload), payload.hex(),
+        )
+        self._notification_received.clear()
+        if use_file_char:
+            await self.api.write_to_file_char(payload)
+        else:
+            await self.api.write_message(payload)
+        try:
+            async with asyncio.timeout(timeout):
+                await self._notification_received.wait()
+            _LOGGER.warning("Got notification after %s!", label)
+            return True
+        except TimeoutError:
+            _LOGGER.warning("No response to %s", label)
+            return False
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
 
-        Subscribes to notifications on the first poll, then sends a
-        BeginLiveFeedRequest to trigger a CirculatorDataPoint notification.
+        Subscribes to notifications on the first poll, then sends a series
+        of command variants to trigger a CirculatorDataPoint notification.
         """
         try:
             reconnected = await self.api.ensure_connected()
@@ -101,67 +126,65 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
 
-            self._notification_received.clear()
+            sender = self.api.sender_address
+            recipient = self.api.recipient_address
+            recipient_rev = self.api.recipient_address_reversed
+            attempt_timeout = self.NOTIFICATION_TIMEOUT / 5
 
-            # Try BeginLiveFeed with no addresses (minimal message)
-            payload_no_addr = build_live_feed_message(
-                sender=b"", recipient=b"",
+            # Attempt 1: IdentifyCirculatorRequest handshake (may be required
+            # before the device responds to other commands)
+            ident_payload = build_identify_circulator_message(
+                sender=sender, recipient=recipient,
             )
-            _LOGGER.warning(
-                "Attempt 1: BeginLiveFeed NO addresses (%d bytes)",
-                len(payload_no_addr),
-            )
-            await self.api.write_message(payload_no_addr)
+            if await self._try_write_and_wait(
+                "Attempt 1: IdentifyCirculatorRequest → 4322",
+                ident_payload, attempt_timeout,
+            ):
+                pass  # got a notification, but still send LiveFeed below
 
-            # Brief wait for response
-            attempt_timeout = self.NOTIFICATION_TIMEOUT / 3
-            try:
-                async with asyncio.timeout(attempt_timeout):
-                    await self._notification_received.wait()
-                _LOGGER.warning("Got notification after attempt 1!")
-            except TimeoutError:
-                _LOGGER.warning("No response to attempt 1")
+            # Attempt 2: BeginLiveFeed with MSB addresses → 4322
+            payload_msb = build_live_feed_message(
+                sender=sender, recipient=recipient,
+            )
+            if await self._try_write_and_wait(
+                "Attempt 2: BeginLiveFeed MSB addr → 4322",
+                payload_msb, attempt_timeout,
+            ):
+                pass  # success
 
             if not self._notification_received.is_set():
-                # Try BeginLiveFeed with real addresses
-                self._notification_received.clear()
-                sender = self.api.sender_address
-                recipient = self.api.recipient_address
-                payload_real = build_live_feed_message(
-                    sender=sender, recipient=recipient,
+                # Attempt 3: BeginLiveFeed with reversed (LSB) MAC → 4322
+                payload_lsb = build_live_feed_message(
+                    sender=sender, recipient=recipient_rev,
                 )
-                _LOGGER.warning(
-                    "Attempt 2: BeginLiveFeed with addresses (%d bytes): %s",
-                    len(payload_real),
-                    payload_real.hex(),
-                )
-                await self.api.write_message(payload_real)
-
-                try:
-                    async with asyncio.timeout(attempt_timeout):
-                        await self._notification_received.wait()
-                    _LOGGER.warning("Got notification after attempt 2!")
-                except TimeoutError:
-                    _LOGGER.warning("No response to attempt 2")
-
-            # Read ALL readable characteristics for diagnostics
-            from .const import READ_CHAR_UUID
-
-            for char_uuid in [
-                READ_CHAR_UUID,           # 4323
-                "700b4324-9836-4383-a2b2-31a9098d1473",  # 4324 (unknown)
-                SUBSCRIBE_CHAR_UUID,      # 4325
-            ]:
-                await self.api.read_characteristic(char_uuid)
+                if await self._try_write_and_wait(
+                    "Attempt 3: BeginLiveFeed LSB addr → 4322",
+                    payload_lsb, attempt_timeout,
+                ):
+                    pass
 
             if not self._notification_received.is_set():
-                # Final wait
-                try:
-                    async with asyncio.timeout(attempt_timeout):
-                        await self._notification_received.wait()
-                    _LOGGER.warning("Got notification after reads!")
-                except TimeoutError:
-                    _LOGGER.warning("Timed out waiting for data from Joule")
+                # Attempt 4: BeginLiveFeed → 4326 FILE_CHAR (write-without-response)
+                if await self._try_write_and_wait(
+                    "Attempt 4: BeginLiveFeed → 4326 (WOR)",
+                    payload_msb, attempt_timeout,
+                    use_file_char=True,
+                ):
+                    pass
+
+            if not self._notification_received.is_set():
+                # Attempt 5: BeginLiveFeed with no addresses (minimal)
+                payload_bare = build_live_feed_message(
+                    sender=b"", recipient=b"",
+                )
+                if await self._try_write_and_wait(
+                    "Attempt 5: BeginLiveFeed bare → 4322",
+                    payload_bare, attempt_timeout,
+                ):
+                    pass
+
+            if not self._notification_received.is_set():
+                _LOGGER.warning("All 5 attempts failed — no notification received")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err

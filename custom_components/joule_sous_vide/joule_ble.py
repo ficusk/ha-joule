@@ -14,7 +14,7 @@ from bleak_retry_connector import establish_connection
 from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.core import HomeAssistant
 
-from .const import READ_CHAR_UUID, SUBSCRIBE_CHAR_UUID, WRITE_CHAR_UUID
+from .const import FILE_CHAR_UUID, READ_CHAR_UUID, SUBSCRIBE_CHAR_UUID, WRITE_CHAR_UUID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +36,8 @@ class JouleBLEAPI:
         self.mac_address = mac_address
         self._client: BleakClient | None = None
         self.recipient_address: bytes = mac_to_bytes(mac_address)
+        # BLE uses LSB-first byte order for addresses
+        self.recipient_address_reversed: bytes = self.recipient_address[::-1]
         # Non-zero sender address (arbitrary app identifier)
         self.sender_address: bytes = b"\x01\x00\x00\x00\x00\x01"
 
@@ -110,6 +112,19 @@ class JouleBLEAPI:
             )
         except BleakError as err:
             raise JouleBLEError("Failed to write message to Joule") from err
+
+    async def write_to_file_char(self, payload: bytes) -> None:
+        """Write a message to the FILE characteristic (4326) using write-without-response."""
+        _LOGGER.warning(
+            "BLE WRITE-WOR to %s (%d bytes): %s",
+            FILE_CHAR_UUID, len(payload), payload.hex(),
+        )
+        try:
+            await self._client.write_gatt_char(
+                FILE_CHAR_UUID, bytearray(payload), response=False
+            )
+        except BleakError as err:
+            raise JouleBLEError("Failed to write to FILE char on Joule") from err
 
     async def read_characteristic(self, char_uuid: str) -> bytes | None:
         """Read a GATT characteristic by UUID. Returns None on error."""
