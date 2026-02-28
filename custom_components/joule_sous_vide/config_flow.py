@@ -44,8 +44,8 @@ class JouleConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             api = JouleBLEAPI(mac_address)
             try:
-                await self.hass.async_add_executor_job(api.connect)
-                await self.hass.async_add_executor_job(api.disconnect)
+                await api.connect()
+                await api.disconnect()
             except JouleBLEError:
                 errors["base"] = "cannot_connect"
             except Exception:

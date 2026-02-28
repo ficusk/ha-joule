@@ -64,12 +64,12 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
 
-    def _on_notification(self, handle: int, value: bytes) -> None:
-        """Handle a BLE notification from pygatt's background thread."""
-        data_point = parse_notification(bytes(value))
+    def _on_notification(self, characteristic: Any, data: bytearray) -> None:
+        """Handle a BLE notification from bleak (runs on the event loop)."""
+        data_point = parse_notification(bytes(data))
         if data_point is not None:
             self._latest_data_point = data_point
-            self.hass.loop.call_soon_threadsafe(self._notification_received.set)
+            self._notification_received.set()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
@@ -78,17 +78,17 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         BeginLiveFeedRequest to trigger a CirculatorDataPoint notification.
         """
         try:
-            await self.hass.async_add_executor_job(self.api.ensure_connected)
+            reconnected = await self.api.ensure_connected()
+            if reconnected:
+                self._subscribed = False
 
             if not self._subscribed:
-                await self.hass.async_add_executor_job(
-                    self.api.subscribe, self._on_notification
-                )
+                await self.api.subscribe(self._on_notification)
                 self._subscribed = True
 
             self._notification_received.clear()
             payload = build_live_feed_message()
-            await self.hass.async_add_executor_job(self.api.write_message, payload)
+            await self.api.write_message(payload)
 
             try:
                 async with asyncio.timeout(self.NOTIFICATION_TIMEOUT):
@@ -128,10 +128,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._target_temperature = target_temperature
         self._cook_time_minutes = cook_time_minutes
         try:
-            await self.hass.async_add_executor_job(self.api.ensure_connected)
+            await self.api.ensure_connected()
             cook_time_seconds = int(cook_time_minutes * 60)
             payload = build_start_cook_message(target_temperature, cook_time_seconds)
-            await self.hass.async_add_executor_job(self.api.write_message, payload)
+            await self.api.write_message(payload)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
 
@@ -160,9 +160,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_stop_cooking(self) -> None:
         """Send a protobuf StopCirculatorRequest to the device."""
         try:
-            await self.hass.async_add_executor_job(self.api.ensure_connected)
+            await self.api.ensure_connected()
             payload = build_stop_cook_message()
-            await self.hass.async_add_executor_job(self.api.write_message, payload)
+            await self.api.write_message(payload)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to stop cooking: {err}") from err
 

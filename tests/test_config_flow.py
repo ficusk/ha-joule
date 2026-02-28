@@ -1,5 +1,5 @@
 """Tests for the config flow (config_flow.py)."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant import config_entries, data_entry_flow
@@ -29,6 +29,8 @@ async def test_form_creates_entry_on_valid_mac(hass: HomeAssistant) -> None:
         "custom_components.joule_sous_vide.config_flow.JouleBLEAPI"
     ) as mock_cls:
         instance = MagicMock()
+        instance.connect = AsyncMock()
+        instance.disconnect = AsyncMock()
         mock_cls.return_value = instance
 
         result = await hass.config_entries.flow.async_init(
@@ -49,7 +51,8 @@ async def test_form_shows_cannot_connect_on_ble_error(hass: HomeAssistant) -> No
         "custom_components.joule_sous_vide.config_flow.JouleBLEAPI"
     ) as mock_cls:
         instance = MagicMock()
-        instance.connect.side_effect = JouleBLEError("Bluetooth failed")
+        instance.connect = AsyncMock(side_effect=JouleBLEError("Bluetooth failed"))
+        instance.disconnect = AsyncMock()
         mock_cls.return_value = instance
 
         result = await hass.config_entries.flow.async_init(
@@ -71,7 +74,8 @@ async def test_form_shows_unknown_error_on_unexpected_exception(
         "custom_components.joule_sous_vide.config_flow.JouleBLEAPI"
     ) as mock_cls:
         instance = MagicMock()
-        instance.connect.side_effect = RuntimeError("Unexpected crash")
+        instance.connect = AsyncMock(side_effect=RuntimeError("Unexpected crash"))
+        instance.disconnect = AsyncMock()
         mock_cls.return_value = instance
 
         result = await hass.config_entries.flow.async_init(
@@ -96,6 +100,8 @@ async def test_form_aborts_if_already_configured(
         "custom_components.joule_sous_vide.config_flow.JouleBLEAPI"
     ) as mock_cls:
         instance = MagicMock()
+        instance.connect = AsyncMock()
+        instance.disconnect = AsyncMock()
         mock_cls.return_value = instance
 
         result = await hass.config_entries.flow.async_init(
@@ -117,6 +123,8 @@ async def test_connect_and_disconnect_called_during_validation(
         "custom_components.joule_sous_vide.config_flow.JouleBLEAPI"
     ) as mock_cls:
         instance = MagicMock()
+        instance.connect = AsyncMock()
+        instance.disconnect = AsyncMock()
         mock_cls.return_value = instance
 
         result = await hass.config_entries.flow.async_init(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
@@ -18,60 +19,50 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
 
 LOVELACE_CARD_URL = f"/{DOMAIN}/joule-card.js"
-LOVELACE_CARD_PATH = str(Path(__file__).parent / "www" / "joule-card.js")
+LOVELACE_LOCAL_URL = "/local/joule-sous-vide-card.js"
+LOVELACE_CARD_PATH = Path(__file__).parent / "www" / "joule-card.js"
+
+
+def _copy_card_to_www(hass: HomeAssistant) -> None:
+    """Copy the card JS to {config}/www/ so it is served at /local/."""
+    www_dir = Path(hass.config.path("www"))
+    www_dir.mkdir(exist_ok=True)
+    dest = www_dir / "joule-sous-vide-card.js"
+    if LOVELACE_CARD_PATH.is_file():
+        shutil.copy2(str(LOVELACE_CARD_PATH), str(dest))
 
 
 async def _register_lovelace_resource(hass: HomeAssistant) -> None:
-    """Add the card JS as a Lovelace resource if not already present.
-
-    Must be called after the Lovelace resource collection has been loaded
-    from disk (i.e. after EVENT_HOMEASSISTANT_STARTED).
-    """
+    """Add the card JS as a Lovelace resource if not already present."""
     try:
         resources = hass.data["lovelace"]["resources"]
         if resources is None:
-            # YAML mode — user manages resources manually.
-            _LOGGER.debug(
-                "Lovelace is in YAML mode; skipping automatic resource registration"
-            )
             return
     except (KeyError, TypeError):
-        _LOGGER.debug("Lovelace resource collection not available")
         return
 
-    # Ensure the collection is loaded so the duplicate check is reliable.
     if not resources.loaded:
         await resources.async_load()
         resources.loaded = True
 
     for item in resources.async_items():
-        if item.get("url") == LOVELACE_CARD_URL:
-            _LOGGER.debug("Lovelace resource %s already registered", LOVELACE_CARD_URL)
+        if item.get("url") == LOVELACE_LOCAL_URL:
             return
 
-    await resources.async_create_item({"res_type": "module", "url": LOVELACE_CARD_URL})
-    _LOGGER.info("Registered Lovelace resource %s", LOVELACE_CARD_URL)
+    await resources.async_create_item(
+        {"res_type": "module", "url": LOVELACE_LOCAL_URL}
+    )
+    _LOGGER.info("Registered Lovelace resource %s", LOVELACE_LOCAL_URL)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register the Lovelace card as a static resource."""
-    # Serve the JS file at /joule_sous_vide/joule-card.js.
-    if hass.http is not None:
-        if Path(LOVELACE_CARD_PATH).is_file():
-            await hass.http.async_register_static_paths(
-                [
-                    StaticPathConfig(
-                        LOVELACE_CARD_URL,
-                        LOVELACE_CARD_PATH,
-                        cache_headers=False,
-                    )
-                ]
-            )
-        else:
-            _LOGGER.warning("Card JS not found at %s", LOVELACE_CARD_PATH)
+    """Copy the card to www/ and register it as a Lovelace resource."""
+    # Copy the card JS to {config}/www/ so it is always available at
+    # /local/joule-sous-vide-card.js regardless of integration state.
+    await hass.async_add_executor_job(_copy_card_to_www, hass)
 
     # Defer resource registration until HA is fully started so the Lovelace
-    # resource collection has been loaded from disk and dedup works correctly.
+    # resource collection is loaded and the duplicate check is reliable.
     async def _on_ha_started(event: Event) -> None:
         await _register_lovelace_resource(hass)
 
@@ -80,13 +71,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Joule Sous Vide from a config entry.
-
-    Creates the coordinator, performs the first BLE poll to verify the
-    device is reachable, then forwards setup to the sensor and switch platforms.
-    Raises ConfigEntryNotReady if the device cannot be reached so HA will
-    retry automatically.
-    """
+    """Set up Joule Sous Vide from a config entry."""
     coordinator = JouleCoordinator(hass, entry)
 
     try:
@@ -109,6 +94,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
-        await hass.async_add_executor_job(coordinator.api.disconnect)
+        await coordinator.api.disconnect()
 
     return unload_ok

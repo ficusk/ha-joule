@@ -1,5 +1,5 @@
 """Shared fixtures for Joule Sous Vide tests."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -28,13 +28,17 @@ def mock_config_entry() -> MockConfigEntry:
 def mock_ble_api():
     """Patch JouleBLEAPI in the coordinator to prevent real BLE connections.
 
-    All BLE methods are replaced with MagicMock (synchronous) since they are
-    called via hass.async_add_executor_job, not awaited directly.
+    All BLE methods are AsyncMock since bleak methods are awaited directly.
     """
     with patch(
         "custom_components.joule_sous_vide.coordinator.JouleBLEAPI"
     ) as mock_cls:
         instance = MagicMock()
+        instance.ensure_connected = AsyncMock(return_value=False)
+        instance.connect = AsyncMock()
+        instance.disconnect = AsyncMock()
+        instance.write_message = AsyncMock()
+        instance.subscribe = AsyncMock()
         mock_cls.return_value = instance
         yield instance
 
