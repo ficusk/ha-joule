@@ -1,6 +1,7 @@
 """BLE API client for the ChefSteps Joule Sous Vide.
 
-All methods are async, using bleak (HA's standard BLE library).
+All methods are async. Uses bleak-retry-connector for reliable connection
+establishment within HA's bluetooth stack.
 """
 from __future__ import annotations
 
@@ -8,6 +9,10 @@ import logging
 from typing import Any, Callable
 
 from bleak import BleakClient, BleakError
+from bleak_retry_connector import establish_connection
+
+from homeassistant.components.bluetooth import async_ble_device_from_address
+from homeassistant.core import HomeAssistant
 
 from .const import SUBSCRIBE_CHAR_UUID, WRITE_CHAR_UUID
 
@@ -21,7 +26,8 @@ class JouleBLEError(Exception):
 class JouleBLEAPI:
     """Manages the BLE connection and GATT characteristic I/O."""
 
-    def __init__(self, mac_address: str) -> None:
+    def __init__(self, hass: HomeAssistant, mac_address: str) -> None:
+        self._hass = hass
         self.mac_address = mac_address
         self._client: BleakClient | None = None
 
@@ -37,15 +43,25 @@ class JouleBLEAPI:
         return True
 
     async def connect(self) -> None:
-        """Open a BLE connection to the device."""
+        """Open a BLE connection to the device via HA's bluetooth stack."""
         try:
-            client = BleakClient(self.mac_address)
-            await client.connect()
+            ble_device = async_ble_device_from_address(
+                self._hass, self.mac_address, connectable=True
+            )
+            if ble_device is None:
+                raise JouleBLEError(
+                    f"Device {self.mac_address} not found by bluetooth scanner"
+                )
+            client = await establish_connection(
+                BleakClient, ble_device, self.mac_address
+            )
             self._client = client
             _LOGGER.info("Connected to Joule at %s", self.mac_address)
         except BleakError as err:
             self._client = None
             raise JouleBLEError(f"Failed to connect to {self.mac_address}") from err
+        except JouleBLEError:
+            raise
         except Exception as err:
             self._client = None
             raise JouleBLEError(

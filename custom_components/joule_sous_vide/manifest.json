@@ -1,7 +1,7 @@
 {
   "domain": "joule_sous_vide",
   "name": "ChefSteps Joule Sous Vide",
-  "after_dependencies": ["http", "lovelace"],
+  "after_dependencies": ["bluetooth", "http", "lovelace"],
   "codeowners": ["@catomaior"],
   "config_flow": true,
   "dependencies": [],

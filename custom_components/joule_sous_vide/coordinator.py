@@ -46,7 +46,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._entry = entry
-        self.api = JouleBLEAPI(entry.data[CONF_MAC_ADDRESS])
+        self.api = JouleBLEAPI(hass, entry.data[CONF_MAC_ADDRESS])
         self._is_cooking: bool = False
         self._target_temperature: float = DEFAULT_TARGET_TEMPERATURE  # always °C
         self._cook_time_minutes: float = DEFAULT_COOK_TIME_MINUTES
