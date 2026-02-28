@@ -57,6 +57,17 @@ class JouleBLEAPI:
             )
             self._client = client
             _LOGGER.info("Connected to Joule at %s", self.mac_address)
+            # Dump discovered services for diagnostics
+            for service in client.services:
+                _LOGGER.debug("Service: %s", service.uuid)
+                for char in service.characteristics:
+                    props = ", ".join(char.properties)
+                    _LOGGER.debug(
+                        "  Char: %s [%s] handle=%s",
+                        char.uuid,
+                        props,
+                        char.handle,
+                    )
         except BleakError as err:
             self._client = None
             raise JouleBLEError(f"Failed to connect to {self.mac_address}") from err
@@ -93,6 +104,24 @@ class JouleBLEAPI:
         ``callback`` is called with ``(characteristic, data)`` for each notification.
         """
         try:
+            # Subscribe to all notify-capable characteristics for diagnostics
+            for service in self._client.services:
+                for char in service.characteristics:
+                    if "notify" in char.properties or "indicate" in char.properties:
+                        if char.uuid != SUBSCRIBE_CHAR_UUID:
+                            _LOGGER.debug(
+                                "Also subscribing to %s for diagnostics", char.uuid
+                            )
+                            await self._client.start_notify(
+                                char.uuid,
+                                lambda c, d: _LOGGER.debug(
+                                    "Notification on OTHER char %s: %d bytes, raw=%s",
+                                    c.uuid if hasattr(c, "uuid") else c,
+                                    len(d),
+                                    d.hex(),
+                                ),
+                            )
+            _LOGGER.debug("Subscribing to primary %s", SUBSCRIBE_CHAR_UUID)
             await self._client.start_notify(SUBSCRIBE_CHAR_UUID, callback)
         except BleakError as err:
             raise JouleBLEError("Failed to subscribe to Joule notifications") from err
