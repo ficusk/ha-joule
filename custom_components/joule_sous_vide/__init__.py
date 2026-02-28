@@ -7,7 +7,7 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import CoreState, Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN
@@ -60,12 +60,16 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     # /local/joule-sous-vide-card.js regardless of integration state.
     await hass.async_add_executor_job(_copy_card_to_www, hass)
 
-    # Defer resource registration until HA is fully started so the Lovelace
-    # resource collection is loaded and the duplicate check is reliable.
-    async def _on_ha_started(event: Event) -> None:
+    # Register the Lovelace resource. If HA is already running (e.g. the
+    # integration was just installed via the UI), register immediately.
+    # Otherwise defer until HA has started so the resource collection is loaded.
+    if hass.state is CoreState.running:
         await _register_lovelace_resource(hass)
+    else:
+        async def _on_ha_started(event: Event) -> None:
+            await _register_lovelace_resource(hass)
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
     return True
 
 

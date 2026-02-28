@@ -119,7 +119,7 @@ async def test_async_setup_copies_card_to_www(
 async def test_async_setup_registers_lovelace_resource(
     hass: HomeAssistant,
 ) -> None:
-    """Resource is added to the Lovelace collection after HA has started."""
+    """Resource is added immediately when HA is already running."""
     from custom_components.joule_sous_vide import async_setup
 
     mock_resources = MagicMock()
@@ -132,10 +132,6 @@ async def test_async_setup_registers_lovelace_resource(
         result = await async_setup(hass, {})
 
     assert result is True
-    # Registration is deferred — fire the event to trigger it.
-    hass.bus.async_fire("homeassistant_started")
-    await hass.async_block_till_done()
-
     mock_resources.async_create_item.assert_called_once_with(
         {"res_type": "module", "url": LOVELACE_LOCAL_URL}
     )
@@ -159,10 +155,39 @@ async def test_async_setup_skips_duplicate_lovelace_resource(
         result = await async_setup(hass, {})
 
     assert result is True
+    mock_resources.async_create_item.assert_not_called()
+
+
+async def test_async_setup_defers_lovelace_resource_during_startup(
+    hass: HomeAssistant,
+) -> None:
+    """Resource registration is deferred to EVENT_HOMEASSISTANT_STARTED during boot."""
+    from homeassistant.core import CoreState
+
+    from custom_components.joule_sous_vide import async_setup
+
+    mock_resources = MagicMock()
+    mock_resources.loaded = True
+    mock_resources.async_items.return_value = []
+    mock_resources.async_create_item = AsyncMock()
+    hass.data["lovelace"] = {"resources": mock_resources}
+
+    hass.set_state(CoreState.starting)
+    with patch.object(hass, "http", None):
+        result = await async_setup(hass, {})
+
+    assert result is True
+    # Not registered yet — still starting.
+    mock_resources.async_create_item.assert_not_called()
+
+    # Fire the event to trigger deferred registration.
+    hass.set_state(CoreState.running)
     hass.bus.async_fire("homeassistant_started")
     await hass.async_block_till_done()
 
-    mock_resources.async_create_item.assert_not_called()
+    mock_resources.async_create_item.assert_called_once_with(
+        {"res_type": "module", "url": LOVELACE_LOCAL_URL}
+    )
 
 
 async def test_async_setup_skips_static_path_when_http_unavailable(
