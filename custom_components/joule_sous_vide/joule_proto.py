@@ -27,6 +27,8 @@ WIRETYPE_FIXED32 = 5
 # ---------------------------------------------------------------------------
 # StreamMessage oneof field numbers
 # ---------------------------------------------------------------------------
+FIELD_PING = 18
+FIELD_PONG = 19
 FIELD_START_PROGRAM_REQUEST = 50
 FIELD_STOP_CIRCULATOR_REQUEST = 60
 FIELD_BEGIN_LIVE_FEED_REQUEST = 70
@@ -183,6 +185,16 @@ class StartProgramRequest:
 
 
 @dataclass
+class Ping:
+    """Ping handshake request (empty body)."""
+
+
+@dataclass
+class Pong:
+    """Pong handshake response (empty body)."""
+
+
+@dataclass
 class StopCirculatorRequest:
     """Stop the active cooking program (empty body)."""
 
@@ -216,11 +228,13 @@ class CirculatorDataPoint:
 class StreamMessage:
     """Root envelope for all Joule BLE messages."""
 
-    handle: int = 0  # field 1, fixed32
-    end: bool = False  # field 4, bool
+    handle: int = 1  # field 1, fixed32 — non-zero session handle
+    end: bool = True  # field 4, bool — True for standalone messages
     sender_address: bytes = b""  # field 5, bytes
     recipient_address: bytes = b""  # field 6, bytes
     # oneof contents — at most one of these is set:
+    ping: Ping | None = None  # field 18
+    pong: Pong | None = None  # field 19
     start_program_request: StartProgramRequest | None = None  # field 50
     stop_circulator_request: StopCirculatorRequest | None = None  # field 60
     begin_live_feed_request: BeginLiveFeedRequest | None = None  # field 70
@@ -275,7 +289,11 @@ def encode_stream_message(message: StreamMessage) -> bytes:
         result += encode_field_bytes(6, message.recipient_address)
 
     # Encode the oneof contents
-    if message.start_program_request is not None:
+    if message.ping is not None:
+        result += encode_field_bytes(FIELD_PING, b"")
+    elif message.pong is not None:
+        result += encode_field_bytes(FIELD_PONG, b"")
+    elif message.start_program_request is not None:
         inner = encode_start_program_request(message.start_program_request)
         result += encode_field_bytes(FIELD_START_PROGRAM_REQUEST, inner)
     elif message.stop_circulator_request is not None:
@@ -331,6 +349,11 @@ def decode_stream_message(data: bytes) -> StreamMessage:
         elif field_number == 6 and wire_type == WIRETYPE_LENGTH_DELIMITED:
             message.recipient_address = value
         elif (
+            field_number == FIELD_PONG
+            and wire_type == WIRETYPE_LENGTH_DELIMITED
+        ):
+            message.pong = Pong()
+        elif (
             field_number == FIELD_CIRCULATOR_DATA_POINT
             and wire_type == WIRETYPE_LENGTH_DELIMITED
         ):
@@ -343,6 +366,19 @@ def decode_stream_message(data: bytes) -> StreamMessage:
 # High-level API
 # ---------------------------------------------------------------------------
 _DEFAULT_ADDRESS = b"\x00" * 6
+
+
+def build_ping_message(
+    sender: bytes = _DEFAULT_ADDRESS,
+    recipient: bytes = _DEFAULT_ADDRESS,
+) -> bytes:
+    """Build a serialized StreamMessage containing a Ping."""
+    msg = StreamMessage(
+        sender_address=sender,
+        recipient_address=recipient,
+        ping=Ping(),
+    )
+    return encode_stream_message(msg)
 
 
 def build_start_cook_message(

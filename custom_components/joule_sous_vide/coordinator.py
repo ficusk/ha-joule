@@ -26,10 +26,11 @@ from .joule_ble import JouleBLEAPI, JouleBLEError
 from .joule_proto import (
     CirculatorDataPoint,
     ProgramStep,
-    build_identify_circulator_message,
     build_live_feed_message,
+    build_ping_message,
     build_start_cook_message,
     build_stop_cook_message,
+    decode_stream_message,
     parse_notification,
 )
 
@@ -71,21 +72,30 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _on_notification(self, characteristic: Any, data: bytearray) -> None:
         """Handle a BLE notification from bleak (runs on the event loop)."""
         _LOGGER.warning(
-            "NOTIFICATION on primary char: %d bytes, raw=%s",
+            "NOTIFICATION: %d bytes, raw=%s",
             len(data),
             data.hex(),
         )
-        data_point = parse_notification(bytes(data))
-        if data_point is not None:
-            _LOGGER.warning(
-                "Parsed CirculatorDataPoint: bath_temp=%.2f, step=%s",
-                data_point.bath_temp,
-                data_point.program_step,
-            )
-            self._latest_data_point = data_point
-            self._notification_received.set()
-        else:
-            _LOGGER.warning("Notification did not contain a CirculatorDataPoint")
+        try:
+            msg = decode_stream_message(bytes(data))
+            if msg.pong is not None:
+                _LOGGER.warning("Got PONG from Joule!")
+                self._notification_received.set()
+            elif msg.circulator_data_point is not None:
+                dp = msg.circulator_data_point
+                _LOGGER.warning(
+                    "Parsed CirculatorDataPoint: bath_temp=%.2f, step=%s",
+                    dp.bath_temp, dp.program_step,
+                )
+                self._latest_data_point = dp
+                self._notification_received.set()
+            else:
+                _LOGGER.warning(
+                    "Notification: handle=%d end=%s sender=%s — no Pong or DataPoint",
+                    msg.handle, msg.end, msg.sender_address.hex() if msg.sender_address else "none",
+                )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Failed to decode notification")
 
     async def _try_write_and_wait(
         self, label: str, payload: bytes, timeout: float,
@@ -134,25 +144,14 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
 
-        Subscribes to notifications on the first poll, then sends a series
-        of command variants to trigger a CirculatorDataPoint notification.
+        Sequence: connect → subscribe → Ping handshake → BeginLiveFeed.
+        All messages now use handle=1 and end=True (previously 0/False).
         """
         try:
             reconnected = await self.api.ensure_connected()
             if reconnected:
                 _LOGGER.warning("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
-
-                # Read GAP Device Name for diagnostics
-                gap_name = await self.api.read_characteristic(
-                    "00002a00-0000-1000-8000-00805f9b34fb"
-                )
-                if gap_name:
-                    _LOGGER.warning(
-                        "GAP Device Name: %s (hex: %s)",
-                        gap_name.decode("utf-8", errors="replace"),
-                        gap_name.hex(),
-                    )
 
             if not self._subscribed:
                 _LOGGER.warning("Subscribing to notifications")
@@ -161,49 +160,40 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             sender = self.api.sender_address
             recipient = self.api.recipient_address
-            attempt_timeout = self.NOTIFICATION_TIMEOUT / 4
+            attempt_timeout = self.NOTIFICATION_TIMEOUT / 3
 
-            # Attempt 1: BeginLiveFeed with response=False on 4322
-            # (original finding: device may ignore write-with-response)
-            payload = build_live_feed_message(
+            # Step 1: Ping handshake (required before operational commands)
+            ping_payload = build_ping_message(
                 sender=sender, recipient=recipient,
             )
-            if await self._try_write_and_wait(
-                "Attempt 1: BeginLiveFeed → 4322 (no-response)",
-                payload, attempt_timeout,
+            got_pong = await self._try_write_and_wait(
+                "Step 1: Ping → 4322",
+                ping_payload, attempt_timeout,
                 no_response=True,
-            ):
-                pass
+            )
+            if got_pong:
+                _LOGGER.warning("Ping/Pong handshake succeeded!")
+
+            # Step 2: BeginLiveFeed (send regardless of Pong result)
+            live_feed_payload = build_live_feed_message(
+                sender=sender, recipient=recipient,
+            )
+            self._notification_received.clear()
+            got_data = await self._try_write_and_wait(
+                "Step 2: BeginLiveFeed → 4322",
+                live_feed_payload, attempt_timeout,
+                no_response=True,
+            )
 
             if not self._notification_received.is_set():
-                # Attempt 2: BeginLiveFeed with response=True on 4322
-                if await self._try_write_and_wait(
-                    "Attempt 2: BeginLiveFeed → 4322 (with-response)",
-                    payload, attempt_timeout,
-                ):
-                    pass
+                # Step 3: Try BeginLiveFeed with response=True
+                got_data = await self._try_write_and_wait(
+                    "Step 3: BeginLiveFeed → 4322 (with-response)",
+                    live_feed_payload, attempt_timeout,
+                )
 
             if not self._notification_received.is_set():
-                # Attempt 3: BeginLiveFeed → 4326 FILE_CHAR (write-without-response)
-                if await self._try_write_and_wait(
-                    "Attempt 3: BeginLiveFeed → 4326 (WOR)",
-                    payload, attempt_timeout,
-                    use_file_char=True,
-                ):
-                    pass
-
-            if not self._notification_received.is_set():
-                # Attempt 4: Raw inner BeginLiveFeedRequest (no StreamMessage envelope)
-                # Some devices expect just the inner command bytes
-                raw_inner = b"\x08\x01"  # field 1 = varint 1 (feed_id=1)
-                if await self._try_write_and_wait(
-                    "Attempt 4: Raw inner bytes → 4322",
-                    raw_inner, attempt_timeout,
-                ):
-                    pass
-
-            if not self._notification_received.is_set():
-                _LOGGER.warning("All 4 attempts failed — no notification received")
+                _LOGGER.warning("All steps failed — no notification received")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
