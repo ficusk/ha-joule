@@ -60,6 +60,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._latest_data_point: CirculatorDataPoint | None = None
         self._notification_received: asyncio.Event = asyncio.Event()
         self._subscribed: bool = False
+        self._paired: bool = False
 
         super().__init__(
             hass,
@@ -89,7 +90,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _try_write_and_wait(
         self, label: str, payload: bytes, timeout: float,
-        *, use_file_char: bool = False,
+        *, use_file_char: bool = False, no_response: bool = False,
     ) -> bool:
         """Write a payload and wait for a notification. Returns True if received."""
         _LOGGER.warning(
@@ -98,16 +99,38 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._notification_received.clear()
         if use_file_char:
             await self.api.write_to_file_char(payload)
+        elif no_response:
+            await self.api.write_message_no_response(payload)
         else:
             await self.api.write_message(payload)
+
+        # Check for notification
         try:
             async with asyncio.timeout(timeout):
                 await self._notification_received.wait()
             _LOGGER.warning("Got notification after %s!", label)
             return True
         except TimeoutError:
-            _LOGGER.warning("No response to %s", label)
-            return False
+            pass
+
+        # Also try reading 4323 for a response (device may not use notifications)
+        read_data = await self.api.read_characteristic(READ_CHAR_UUID)
+        if read_data and len(read_data) > 0:
+            _LOGGER.warning(
+                "READ after %s: %d bytes: %s", label, len(read_data), read_data.hex(),
+            )
+            data_point = parse_notification(read_data)
+            if data_point is not None:
+                _LOGGER.warning(
+                    "Parsed from READ! bath_temp=%.2f, step=%s",
+                    data_point.bath_temp, data_point.program_step,
+                )
+                self._latest_data_point = data_point
+                self._notification_received.set()
+                return True
+
+        _LOGGER.warning("No response to %s", label)
+        return False
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
@@ -120,6 +143,13 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if reconnected:
                 _LOGGER.warning("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
+                self._paired = False
+
+            # Attempt pairing on first connection (may be required before
+            # the device processes application-layer commands)
+            if not self._paired:
+                await self.api.pair()
+                self._paired = True
 
             if not self._subscribed:
                 _LOGGER.warning("Subscribing to notifications")
@@ -128,63 +158,49 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             sender = self.api.sender_address
             recipient = self.api.recipient_address
-            recipient_rev = self.api.recipient_address_reversed
-            attempt_timeout = self.NOTIFICATION_TIMEOUT / 5
+            attempt_timeout = self.NOTIFICATION_TIMEOUT / 4
 
-            # Attempt 1: IdentifyCirculatorRequest handshake (may be required
-            # before the device responds to other commands)
-            ident_payload = build_identify_circulator_message(
+            # Attempt 1: BeginLiveFeed with response=False on 4322
+            # (original finding: device may ignore write-with-response)
+            payload = build_live_feed_message(
                 sender=sender, recipient=recipient,
             )
             if await self._try_write_and_wait(
-                "Attempt 1: IdentifyCirculatorRequest → 4322",
-                ident_payload, attempt_timeout,
+                "Attempt 1: BeginLiveFeed → 4322 (no-response)",
+                payload, attempt_timeout,
+                no_response=True,
             ):
-                pass  # got a notification, but still send LiveFeed below
-
-            # Attempt 2: BeginLiveFeed with MSB addresses → 4322
-            payload_msb = build_live_feed_message(
-                sender=sender, recipient=recipient,
-            )
-            if await self._try_write_and_wait(
-                "Attempt 2: BeginLiveFeed MSB addr → 4322",
-                payload_msb, attempt_timeout,
-            ):
-                pass  # success
+                pass
 
             if not self._notification_received.is_set():
-                # Attempt 3: BeginLiveFeed with reversed (LSB) MAC → 4322
-                payload_lsb = build_live_feed_message(
-                    sender=sender, recipient=recipient_rev,
-                )
+                # Attempt 2: BeginLiveFeed with response=True on 4322
                 if await self._try_write_and_wait(
-                    "Attempt 3: BeginLiveFeed LSB addr → 4322",
-                    payload_lsb, attempt_timeout,
+                    "Attempt 2: BeginLiveFeed → 4322 (with-response)",
+                    payload, attempt_timeout,
                 ):
                     pass
 
             if not self._notification_received.is_set():
-                # Attempt 4: BeginLiveFeed → 4326 FILE_CHAR (write-without-response)
+                # Attempt 3: BeginLiveFeed → 4326 FILE_CHAR (write-without-response)
                 if await self._try_write_and_wait(
-                    "Attempt 4: BeginLiveFeed → 4326 (WOR)",
-                    payload_msb, attempt_timeout,
+                    "Attempt 3: BeginLiveFeed → 4326 (WOR)",
+                    payload, attempt_timeout,
                     use_file_char=True,
                 ):
                     pass
 
             if not self._notification_received.is_set():
-                # Attempt 5: BeginLiveFeed with no addresses (minimal)
-                payload_bare = build_live_feed_message(
-                    sender=b"", recipient=b"",
-                )
+                # Attempt 4: Raw inner BeginLiveFeedRequest (no StreamMessage envelope)
+                # Some devices expect just the inner command bytes
+                raw_inner = b"\x08\x01"  # field 1 = varint 1 (feed_id=1)
                 if await self._try_write_and_wait(
-                    "Attempt 5: BeginLiveFeed bare → 4322",
-                    payload_bare, attempt_timeout,
+                    "Attempt 4: Raw inner bytes → 4322",
+                    raw_inner, attempt_timeout,
                 ):
                     pass
 
             if not self._notification_received.is_set():
-                _LOGGER.warning("All 5 attempts failed — no notification received")
+                _LOGGER.warning("All 4 attempts failed — no notification received")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err

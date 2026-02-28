@@ -99,19 +99,38 @@ class JouleBLEAPI:
         finally:
             self._client = None
 
+    async def pair(self) -> None:
+        """Attempt BLE pairing/bonding with the device."""
+        try:
+            _LOGGER.warning("Attempting BLE pair with %s", self.mac_address)
+            result = await self._client.pair()
+            _LOGGER.warning("Pair result: %s", result)
+        except (BleakError, Exception) as err:  # noqa: BLE001
+            _LOGGER.warning("Pair failed (non-fatal): %s", err)
+
     async def write_message(self, payload: bytes) -> None:
-        """Write a protobuf-encoded message to the device."""
+        """Write a protobuf-encoded message to the device (write-with-response)."""
         _LOGGER.warning(
             "BLE WRITE to %s (%d bytes): %s", WRITE_CHAR_UUID, len(payload), payload.hex()
         )
         try:
-            # The WRITE characteristic (4322) only supports "write" (write-with-response),
-            # NOT "write-without-response", so response=True is required.
             await self._client.write_gatt_char(
                 WRITE_CHAR_UUID, bytearray(payload), response=True
             )
         except BleakError as err:
             raise JouleBLEError("Failed to write message to Joule") from err
+
+    async def write_message_no_response(self, payload: bytes) -> None:
+        """Write a protobuf-encoded message to 4322 with response=False."""
+        _LOGGER.warning(
+            "BLE WRITE-NR to %s (%d bytes): %s", WRITE_CHAR_UUID, len(payload), payload.hex()
+        )
+        try:
+            await self._client.write_gatt_char(
+                WRITE_CHAR_UUID, bytearray(payload), response=False
+            )
+        except BleakError as err:
+            raise JouleBLEError("Failed to write (no-response) to Joule") from err
 
     async def write_to_file_char(self, payload: bytes) -> None:
         """Write a message to the FILE characteristic (4326) using write-without-response."""

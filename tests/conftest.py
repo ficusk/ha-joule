@@ -38,7 +38,9 @@ def mock_ble_api():
         instance.connect = AsyncMock()
         instance.disconnect = AsyncMock()
         instance.write_message = AsyncMock()
+        instance.write_message_no_response = AsyncMock()
         instance.write_to_file_char = AsyncMock()
+        instance.pair = AsyncMock()
         instance.subscribe = AsyncMock()
         instance.read_characteristic = AsyncMock(return_value=None)
         instance.sender_address = b"\x01\x00\x00\x00\x00\x01"
