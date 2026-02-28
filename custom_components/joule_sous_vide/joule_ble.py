@@ -65,7 +65,9 @@ class JouleBLEAPI:
     async def write_message(self, payload: bytes) -> None:
         """Write a protobuf-encoded message to the device."""
         try:
-            await self._client.write_gatt_char(WRITE_CHAR_UUID, bytearray(payload))
+            await self._client.write_gatt_char(
+                WRITE_CHAR_UUID, bytearray(payload), response=False
+            )
         except BleakError as err:
             raise JouleBLEError("Failed to write message to Joule") from err
 
