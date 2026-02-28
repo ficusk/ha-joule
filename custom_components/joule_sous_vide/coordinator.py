@@ -66,10 +66,22 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _on_notification(self, characteristic: Any, data: bytearray) -> None:
         """Handle a BLE notification from bleak (runs on the event loop)."""
+        _LOGGER.debug(
+            "Notification received: %d bytes, raw=%s",
+            len(data),
+            data.hex(),
+        )
         data_point = parse_notification(bytes(data))
         if data_point is not None:
+            _LOGGER.debug(
+                "Parsed CirculatorDataPoint: bath_temp=%.2f, step=%s",
+                data_point.bath_temp,
+                data_point.program_step,
+            )
             self._latest_data_point = data_point
             self._notification_received.set()
+        else:
+            _LOGGER.debug("Notification did not contain a CirculatorDataPoint")
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
@@ -80,19 +92,23 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             reconnected = await self.api.ensure_connected()
             if reconnected:
+                _LOGGER.debug("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
 
             if not self._subscribed:
+                _LOGGER.debug("Subscribing to notifications")
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
 
             self._notification_received.clear()
             payload = build_live_feed_message()
+            _LOGGER.debug("Sending BeginLiveFeedRequest (%d bytes)", len(payload))
             await self.api.write_message(payload)
 
             try:
                 async with asyncio.timeout(self.NOTIFICATION_TIMEOUT):
                     await self._notification_received.wait()
+                _LOGGER.debug("Notification received within timeout")
             except TimeoutError:
                 _LOGGER.warning("Timed out waiting for data from Joule")
 
