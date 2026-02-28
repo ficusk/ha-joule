@@ -18,6 +18,7 @@ from .const import (
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_TEMPERATURE_UNIT,
     DOMAIN,
+    SUBSCRIBE_CHAR_UUID,
 )
 from .joule_ble import JouleBLEAPI, JouleBLEError
 from .joule_proto import (
@@ -101,36 +102,66 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._subscribed = True
 
             self._notification_received.clear()
-            sender = self.api.sender_address
-            recipient = self.api.recipient_address
-            _LOGGER.warning(
-                "Using sender=%s, recipient=%s",
-                sender.hex(),
-                recipient.hex(),
-            )
-            payload = build_live_feed_message(
-                sender=sender, recipient=recipient,
-            )
-            _LOGGER.warning("Sending BeginLiveFeedRequest (%d bytes)", len(payload))
-            await self.api.write_message(payload)
 
-            # Also try a direct read from the READ characteristic
+            # Try BeginLiveFeed with no addresses (minimal message)
+            payload_no_addr = build_live_feed_message(
+                sender=b"", recipient=b"",
+            )
+            _LOGGER.warning(
+                "Attempt 1: BeginLiveFeed NO addresses (%d bytes)",
+                len(payload_no_addr),
+            )
+            await self.api.write_message(payload_no_addr)
+
+            # Brief wait for response
+            attempt_timeout = self.NOTIFICATION_TIMEOUT / 3
+            try:
+                async with asyncio.timeout(attempt_timeout):
+                    await self._notification_received.wait()
+                _LOGGER.warning("Got notification after attempt 1!")
+            except TimeoutError:
+                _LOGGER.warning("No response to attempt 1")
+
+            if not self._notification_received.is_set():
+                # Try BeginLiveFeed with real addresses
+                self._notification_received.clear()
+                sender = self.api.sender_address
+                recipient = self.api.recipient_address
+                payload_real = build_live_feed_message(
+                    sender=sender, recipient=recipient,
+                )
+                _LOGGER.warning(
+                    "Attempt 2: BeginLiveFeed with addresses (%d bytes): %s",
+                    len(payload_real),
+                    payload_real.hex(),
+                )
+                await self.api.write_message(payload_real)
+
+                try:
+                    async with asyncio.timeout(attempt_timeout):
+                        await self._notification_received.wait()
+                    _LOGGER.warning("Got notification after attempt 2!")
+                except TimeoutError:
+                    _LOGGER.warning("No response to attempt 2")
+
+            # Read ALL readable characteristics for diagnostics
             from .const import READ_CHAR_UUID
 
-            read_data = await self.api.read_characteristic(READ_CHAR_UUID)
-            if read_data:
-                _LOGGER.warning(
-                    "Direct READ returned %d bytes: %s",
-                    len(read_data),
-                    read_data.hex(),
-                )
+            for char_uuid in [
+                READ_CHAR_UUID,           # 4323
+                "700b4324-9836-4383-a2b2-31a9098d1473",  # 4324 (unknown)
+                SUBSCRIBE_CHAR_UUID,      # 4325
+            ]:
+                await self.api.read_characteristic(char_uuid)
 
-            try:
-                async with asyncio.timeout(self.NOTIFICATION_TIMEOUT):
-                    await self._notification_received.wait()
-                _LOGGER.warning("Notification received within timeout")
-            except TimeoutError:
-                _LOGGER.warning("Timed out waiting for data from Joule")
+            if not self._notification_received.is_set():
+                # Final wait
+                try:
+                    async with asyncio.timeout(attempt_timeout):
+                        await self._notification_received.wait()
+                    _LOGGER.warning("Got notification after reads!")
+                except TimeoutError:
+                    _LOGGER.warning("Timed out waiting for data from Joule")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
