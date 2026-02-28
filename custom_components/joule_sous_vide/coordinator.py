@@ -66,14 +66,14 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _on_notification(self, characteristic: Any, data: bytearray) -> None:
         """Handle a BLE notification from bleak (runs on the event loop)."""
-        _LOGGER.debug(
-            "Notification received: %d bytes, raw=%s",
+        _LOGGER.warning(
+            "NOTIFICATION on primary char: %d bytes, raw=%s",
             len(data),
             data.hex(),
         )
         data_point = parse_notification(bytes(data))
         if data_point is not None:
-            _LOGGER.debug(
+            _LOGGER.warning(
                 "Parsed CirculatorDataPoint: bath_temp=%.2f, step=%s",
                 data_point.bath_temp,
                 data_point.program_step,
@@ -81,7 +81,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._latest_data_point = data_point
             self._notification_received.set()
         else:
-            _LOGGER.debug("Notification did not contain a CirculatorDataPoint")
+            _LOGGER.warning("Notification did not contain a CirculatorDataPoint")
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
@@ -92,23 +92,43 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             reconnected = await self.api.ensure_connected()
             if reconnected:
-                _LOGGER.debug("Fresh BLE connection — will re-subscribe")
+                _LOGGER.warning("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
 
             if not self._subscribed:
-                _LOGGER.debug("Subscribing to notifications")
+                _LOGGER.warning("Subscribing to notifications")
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
 
             self._notification_received.clear()
-            payload = build_live_feed_message()
-            _LOGGER.debug("Sending BeginLiveFeedRequest (%d bytes)", len(payload))
+            sender = self.api.sender_address
+            recipient = self.api.recipient_address
+            _LOGGER.warning(
+                "Using sender=%s, recipient=%s",
+                sender.hex(),
+                recipient.hex(),
+            )
+            payload = build_live_feed_message(
+                sender=sender, recipient=recipient,
+            )
+            _LOGGER.warning("Sending BeginLiveFeedRequest (%d bytes)", len(payload))
             await self.api.write_message(payload)
+
+            # Also try a direct read from the READ characteristic
+            from .const import READ_CHAR_UUID
+
+            read_data = await self.api.read_characteristic(READ_CHAR_UUID)
+            if read_data:
+                _LOGGER.warning(
+                    "Direct READ returned %d bytes: %s",
+                    len(read_data),
+                    read_data.hex(),
+                )
 
             try:
                 async with asyncio.timeout(self.NOTIFICATION_TIMEOUT):
                     await self._notification_received.wait()
-                _LOGGER.debug("Notification received within timeout")
+                _LOGGER.warning("Notification received within timeout")
             except TimeoutError:
                 _LOGGER.warning("Timed out waiting for data from Joule")
 
@@ -146,7 +166,12 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self.api.ensure_connected()
             cook_time_seconds = int(cook_time_minutes * 60)
-            payload = build_start_cook_message(target_temperature, cook_time_seconds)
+            payload = build_start_cook_message(
+                target_temperature,
+                cook_time_seconds,
+                sender=self.api.sender_address,
+                recipient=self.api.recipient_address,
+            )
             await self.api.write_message(payload)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
@@ -177,7 +202,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Send a protobuf StopCirculatorRequest to the device."""
         try:
             await self.api.ensure_connected()
-            payload = build_stop_cook_message()
+            payload = build_stop_cook_message(
+                sender=self.api.sender_address,
+                recipient=self.api.recipient_address,
+            )
             await self.api.write_message(payload)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to stop cooking: {err}") from err
