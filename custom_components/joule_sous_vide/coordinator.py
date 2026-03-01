@@ -550,7 +550,25 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
 
         self._is_cooking = True
-        await self.async_refresh()
+        self._publish_state()
+
+    def _publish_state(self) -> None:
+        """Push current state to entities without triggering a full poll.
+
+        Used after cook commands to reflect optimistic state immediately.
+        A full _async_update_data() poll would read stale CirculatorDataPoint
+        data (still step=UNKNOWN) and override the is_cooking flag.
+        """
+        current_temp = 0.0
+        if self._latest_data_point is not None:
+            current_temp = self._latest_data_point.bath_temp
+        self.async_set_updated_data({
+            "current_temperature": current_temp,
+            "is_cooking": self._is_cooking,
+            "target_temperature": self._target_temperature,
+            "cook_time_minutes": self._cook_time_minutes,
+            "temperature_unit": self._temperature_unit,
+        })
 
     async def async_set_target_temperature(self, value_celsius: float) -> None:
         """Update the target temperature (always in °C) without starting a cook."""
@@ -584,4 +602,4 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise HomeAssistantError(f"Failed to stop cooking: {err}") from err
 
         self._is_cooking = False
-        await self.async_refresh()
+        self._publish_state()
