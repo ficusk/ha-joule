@@ -318,10 +318,11 @@ def encode_stream_message(message: StreamMessage) -> bytes:
     result = encode_field_fixed32(1, message.handle)
     if message.end:
         result += encode_field_varint(4, 1)
-    if message.sender_address:
-        result += encode_field_bytes(5, message.sender_address)
-    if message.recipient_address:
-        result += encode_field_bytes(6, message.recipient_address)
+    # senderAddress (field 5) and recipientAddress (field 6) are `required`
+    # in the Joule's proto2 definition.  Always encode them — even when empty
+    # — so the firmware's protobuf parser doesn't reject the message.
+    result += encode_field_bytes(5, message.sender_address)
+    result += encode_field_bytes(6, message.recipient_address)
 
     # Encode the oneof contents
     if message.ping is not None:

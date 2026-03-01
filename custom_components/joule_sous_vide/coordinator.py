@@ -269,25 +269,25 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The Joule uses its own key exchange (NOT OS-level BLE pairing).
         The user must press the button on top of the Joule within 60 seconds.
 
-        v0.9.8 revealed MTU=23 (20-byte payload).  The Android app always
-        sends full StreamMessage (handle+end+sender+recipient+command = 30
-        bytes) in a single packet because Android auto-negotiates larger MTU.
-        At MTU=23, 30 bytes requires Long Write (fragmentation) which the
-        Nordic nRF SoftDevice may not forward to the application layer.
+        v0.9.9 revealed that compact messages missing proto2 `required` fields
+        (senderAddress, recipientAddress) are silently rejected by the Joule's
+        nanopb parser.  This version uses encode_stream_message() which always
+        includes those fields — even when empty — satisfying proto2 validation.
 
-        This version builds "compact" full-format messages (handle+end+command,
-        no addresses) that fit in 20 bytes, AND sends 30-byte full-format
-        messages with response=True (which triggers Long Write via BlueZ).
+        Message variants (all include required fields 5 and 6):
+        - empty addrs (14B): fits in 20-byte ATT payload at MTU=23
+        - empty sender + 6-byte MAC recipient (20B): fits exactly
+        - full 8-byte addrs (34B): via Long Write (response=True)
         """
         from homeassistant.components.persistent_notification import (
             async_create,
             async_dismiss,
         )
+        from .joule_ble import mac_to_bytes
         from .joule_proto import (
-            encode_field_bytes,
-            encode_field_fixed32,
-            encode_field_varint,
-            FIELD_START_KEY_EXCHANGE_REQUEST,
+            StreamMessage,
+            StartKeyExchangeRequest,
+            encode_stream_message,
         )
 
         mtu_payload = self.api.mtu_size - 3 if self.api.mtu_size > 3 else 20
@@ -302,85 +302,62 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         try:
-            # --- Compact full-format messages (fit in 20-byte MTU) ---
-            # handle(1)=5B + end(true)=2B + command=3B = 10 bytes
-            compact_ke = (
-                encode_field_fixed32(1, 1)          # handle = 1
-                + encode_field_varint(4, 1)          # end = true
-                + encode_field_bytes(FIELD_START_KEY_EXCHANGE_REQUEST, b"")
-            )
-            _LOGGER.warning(
-                "COMPACT key exchange (%d bytes): %s",
-                len(compact_ke), compact_ke.hex(),
-            )
-            # Write compact to 4322 with response=True
-            await self._safe_write(
-                "compact-WR", compact_ke, response=True,
-            )
-            # Write compact to 4322 with response=False
-            await self._safe_write(
-                "compact-WC", compact_ke, response=False,
-            )
+            mac_6 = mac_to_bytes(self.api.mac_address)
 
-            # --- Compact with empty sender (matches app structure) ---
-            # handle(1)+end(true)+sender(empty)+command = 12 bytes
-            compact_sender = (
-                encode_field_fixed32(1, 1)
-                + encode_field_varint(4, 1)
-                + encode_field_bytes(5, b"")  # sender = empty
-                + encode_field_bytes(FIELD_START_KEY_EXCHANGE_REQUEST, b"")
+            # --- Variant A: empty addresses (14 bytes) ---
+            # All required fields present; addresses are zero-length bytes.
+            msg_empty = StreamMessage(
+                handle=1,
+                end=True,
+                sender_address=b"",
+                recipient_address=b"",
+                start_key_exchange_request=StartKeyExchangeRequest(),
             )
+            payload_empty = encode_stream_message(msg_empty)
             _LOGGER.warning(
-                "COMPACT+sender (%d bytes): %s",
-                len(compact_sender), compact_sender.hex(),
+                "KE-empty-addrs (%d bytes): %s",
+                len(payload_empty), payload_empty.hex(),
             )
-            await self._safe_write(
-                "compact+sender-WR", compact_sender, response=True,
-            )
+            await self._safe_write("KE-empty-WR", payload_empty, response=True)
+            await self._safe_write("KE-empty-WC", payload_empty, response=False)
 
-            # --- SDK-minimal (no handle/end, just command) ---
-            bare_ke = encode_field_bytes(FIELD_START_KEY_EXCHANGE_REQUEST, b"")
+            # --- Variant B: empty sender + 6-byte MAC recipient (20 bytes) ---
+            msg_mac6 = StreamMessage(
+                handle=1,
+                end=True,
+                sender_address=b"",
+                recipient_address=mac_6,
+                start_key_exchange_request=StartKeyExchangeRequest(),
+            )
+            payload_mac6 = encode_stream_message(msg_mac6)
             _LOGGER.warning(
-                "BARE key exchange (%d bytes): %s",
-                len(bare_ke), bare_ke.hex(),
+                "KE-mac6 (%d bytes): %s",
+                len(payload_mac6), payload_mac6.hex(),
             )
-            await self._safe_write("bare-WR", bare_ke, response=True)
+            await self._safe_write("KE-mac6-WR", payload_mac6, response=True)
 
-            # --- Full format with addresses (30 bytes) ---
-            # Only works if MTU >= 33 or via Long Write (response=True)
+            # --- Variant C: full format with 8-byte padded addresses ---
             full_payload = build_start_key_exchange_message(
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
             )
             _LOGGER.warning(
-                "FULL key exchange (%d bytes, MTU payload=%d): %s",
+                "KE-full (%d bytes, MTU payload=%d): %s",
                 len(full_payload), mtu_payload, full_payload.hex(),
             )
-            if len(full_payload) <= mtu_payload:
-                # Fits in single ATT packet
-                await self._safe_write(
-                    "full-single", full_payload, response=True,
-                )
-            else:
-                # Requires Long Write — try response=True (BlueZ handles it)
-                await self._safe_write(
-                    "full-longwrite", full_payload, response=True,
-                )
-                _LOGGER.warning(
-                    "NOTE: %d-byte message sent via Long Write (fragmented) — "
-                    "device may not handle fragmented writes correctly",
-                    len(full_payload),
-                )
+            await self._safe_write(
+                "KE-full-longwrite", full_payload, response=True,
+            )
 
             # --- Wait for any response ---
             _LOGGER.warning(
-                "All variants sent — waiting %.0fs for response "
+                "All KE variants sent — waiting %.0fs for response "
                 "(PRESS JOULE BUTTON NOW!)",
                 self.KEY_EXCHANGE_TIMEOUT,
             )
             got_reply = await self._try_write_and_wait(
-                "KeyExchange-wait",
-                compact_ke,
+                "KE-wait",
+                payload_empty,
                 self.KEY_EXCHANGE_TIMEOUT,
             )
 
