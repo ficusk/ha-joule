@@ -31,7 +31,6 @@ from .joule_proto import (
     build_stop_cook_message,
     build_submit_key_message,
     decode_stream_message,
-    parse_notification,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -253,25 +252,20 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The Joule uses its own key exchange (NOT OS-level BLE pairing).
         The user must press the button on top of the Joule within 60 seconds.
 
-        Tries multiple message variants because the SDK's makeStreamMessage()
-        only sets recipientAddress (no sender, no end flag, random handle).
-        Returns True if authentication succeeded.
+        The recipient_address is the 8-byte circulator address extracted from
+        BLE manufacturer advertising data (company ID 0x0159).  The sender is
+        an arbitrary 8-byte identifier (SDK default "aabbaabbaabbaabb").
         """
-        import random
         from homeassistant.components.persistent_notification import (
             async_create,
             async_dismiss,
         )
-        from .joule_proto import (
-            StreamMessage,
-            StartKeyExchangeRequest,
-            encode_stream_message,
-            FIELD_START_KEY_EXCHANGE_REQUEST,
-            encode_field_bytes,
-            encode_field_fixed32,
-        )
 
-        _LOGGER.warning("Starting key exchange — user must press Joule button")
+        _LOGGER.warning(
+            "Starting key exchange — recipient=%s sender=%s",
+            self.api.recipient_address.hex(),
+            self.api.sender_address.hex(),
+        )
         async_create(
             self.hass,
             "**Press the button on top of your Joule** to complete pairing.\n\n"
@@ -280,69 +274,15 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             notification_id="joule_sous_vide_pairing",
         )
 
-        recipient = self.api.recipient_address
-
-        # Build multiple message variants to find the right format.
-        # The SDK's makeStreamMessage() only sets recipientAddress;
-        # sender, end, and handle are set differently than we assumed.
-        # We send ALL variants quickly, then wait for a response.
-        rand_handle = random.randint(1000, 500000)
-
-        # V1: SDK-style minimal — recipient only, no sender, end=False
-        v1 = encode_stream_message(StreamMessage(
-            handle=rand_handle, end=False,
-            recipient_address=recipient,
-            start_key_exchange_request=StartKeyExchangeRequest(),
-        ))
-        # V2: Same as V1 but end=True
-        v2 = encode_stream_message(StreamMessage(
-            handle=rand_handle, end=True,
-            recipient_address=recipient,
-            start_key_exchange_request=StartKeyExchangeRequest(),
-        ))
-        # V3: Original format (sender + end + handle=1)
-        v3 = build_start_key_exchange_message(
+        payload = build_start_key_exchange_message(
             sender=self.api.sender_address,
-            recipient=recipient,
+            recipient=self.api.recipient_address,
         )
 
-        # Variants: (label, payload, use_write_without_response)
-        variants: list[tuple[str, bytes, bool]] = [
-            ("V1-WR (no sender, end=F, write-req)", v1, False),
-            ("V2-WR (no sender, end=T, write-req)", v2, False),
-            ("V3-WR (full msg, write-req)", v3, False),
-            ("V1-WC (no sender, end=F, write-cmd)", v1, True),
-            ("V2-WC (no sender, end=T, write-cmd)", v2, True),
-            ("V3-WC (full msg, write-cmd)", v3, True),
-        ]
-
         try:
-            # Send all variants quickly, then wait for a response.
-            for label, payload, no_resp in variants:
-                _LOGGER.warning(
-                    "KEY EXCHANGE %s (%d bytes): %s",
-                    label, len(payload), payload.hex(),
-                )
-                self._notification_received.clear()
-                try:
-                    async with asyncio.timeout(5):
-                        if no_resp:
-                            await self.api.write_message_no_response(payload)
-                        else:
-                            await self.api.write_message(payload)
-                    _LOGGER.warning("Write OK: %s", label)
-                except (TimeoutError, JouleBLEError) as err:
-                    _LOGGER.warning("Write FAIL %s: %s", label, err)
-
-            # Now wait the full timeout for any response
-            _LOGGER.warning(
-                "All variants sent — waiting %.0fs for response "
-                "(PRESS JOULE BUTTON NOW!)",
-                self.KEY_EXCHANGE_TIMEOUT,
-            )
             got_reply = await self._try_write_and_wait(
-                "KeyExchange (re-send V1 + wait)",
-                v1,  # re-send the most likely format
+                "StartKeyExchangeRequest",
+                payload,
                 self.KEY_EXCHANGE_TIMEOUT,
             )
 
@@ -351,7 +291,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return await self._submit_key(self._auth_key)
 
             _LOGGER.warning(
-                "Key exchange timed out — no variant got a response"
+                "Key exchange timed out — no response after %.0fs",
+                self.KEY_EXCHANGE_TIMEOUT,
             )
             return False
 

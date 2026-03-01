@@ -11,10 +11,19 @@ from typing import Any, Callable
 from bleak import BleakClient, BleakError
 from bleak_retry_connector import establish_connection
 
-from homeassistant.components.bluetooth import async_ble_device_from_address
+from homeassistant.components.bluetooth import (
+    async_ble_device_from_address,
+    async_discovered_service_info,
+)
 from homeassistant.core import HomeAssistant
 
-from .const import FILE_CHAR_UUID, READ_CHAR_UUID, SUBSCRIBE_CHAR_UUID, WRITE_CHAR_UUID
+from .const import (
+    FILE_CHAR_UUID,
+    JOULE_MANUFACTURER_ID,
+    READ_CHAR_UUID,
+    SUBSCRIBE_CHAR_UUID,
+    WRITE_CHAR_UUID,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,11 +44,54 @@ class JouleBLEAPI:
         self._hass = hass
         self.mac_address = mac_address
         self._client: BleakClient | None = None
-        self.recipient_address: bytes = mac_to_bytes(mac_address)
-        # BLE uses LSB-first byte order for addresses
-        self.recipient_address_reversed: bytes = self.recipient_address[::-1]
-        # Non-zero sender address (arbitrary app identifier)
-        self.sender_address: bytes = b"\x01\x00\x00\x00\x00\x01"
+        # 8-byte circulator address from BLE manufacturer advertising data.
+        # The Joule advertises under company ID 0x0159 (ChefSteps); the payload
+        # is the 8-byte address used as recipientAddress in protobuf messages.
+        self.recipient_address: bytes = self._extract_circulator_address()
+        # 8-byte sender address — SDK uses JWT token field 'a', or falls back
+        # to "aabbaabbaabbaabb" when no cloud token is available.
+        self.sender_address: bytes = bytes.fromhex("aabbaabbaabbaabb")
+
+    def _extract_circulator_address(self) -> bytes:
+        """Extract the 8-byte circulator address from BLE manufacturer data.
+
+        The Joule advertises manufacturer-specific data under company ID 0x0159.
+        HA's bluetooth scanner strips the 2-byte company ID prefix, so the value
+        at key 0x0159 is the raw 8-byte circulator address.
+
+        Falls back to the MAC padded to 8 bytes if manufacturer data is not
+        (yet) available — this fallback will likely NOT work but allows setup
+        to proceed so the user sees a helpful error rather than a crash.
+        """
+        try:
+            for info in async_discovered_service_info(self._hass, connectable=True):
+                if info.address.upper() == self.mac_address.upper():
+                    if JOULE_MANUFACTURER_ID in info.manufacturer_data:
+                        addr = bytes(info.manufacturer_data[JOULE_MANUFACTURER_ID])
+                        _LOGGER.warning(
+                            "Circulator address from manufacturer data: %s (%d bytes)",
+                            addr.hex(), len(addr),
+                        )
+                        return addr
+                    _LOGGER.warning(
+                        "Found device %s but no manufacturer data for ID 0x%04X. "
+                        "Available keys: %s",
+                        self.mac_address,
+                        JOULE_MANUFACTURER_ID,
+                        list(info.manufacturer_data.keys()),
+                    )
+                    break
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Could not query bluetooth scanner for manufacturer data"
+            )
+
+        # Fallback: pad MAC to 8 bytes (unlikely to work)
+        fallback = mac_to_bytes(self.mac_address) + b"\x00\x00"
+        _LOGGER.warning(
+            "Using padded MAC as fallback circulator address: %s", fallback.hex(),
+        )
+        return fallback
 
     async def ensure_connected(self) -> bool:
         """Connect to the device if not already connected.
@@ -62,13 +114,30 @@ class JouleBLEAPI:
                 raise JouleBLEError(
                     f"Device {self.mac_address} not found by bluetooth scanner"
                 )
-            # Log BLEDevice details to identify adapter (local vs proxy)
+            # Log BLEDevice details and re-extract manufacturer data if stale
             _LOGGER.warning(
                 "BLEDevice: name=%s, rssi=%s, details=%s",
                 ble_device.name,
                 getattr(ble_device, "rssi", "N/A"),
                 ble_device.details,
             )
+            # Re-check manufacturer data at connect time (scanner may have
+            # updated since __init__)
+            for info in async_discovered_service_info(self._hass, connectable=True):
+                if info.address.upper() == self.mac_address.upper():
+                    _LOGGER.warning(
+                        "Manufacturer data at connect: %s",
+                        {hex(k): v.hex() for k, v in info.manufacturer_data.items()},
+                    )
+                    if JOULE_MANUFACTURER_ID in info.manufacturer_data:
+                        fresh = bytes(info.manufacturer_data[JOULE_MANUFACTURER_ID])
+                        if fresh != self.recipient_address:
+                            _LOGGER.warning(
+                                "Updating circulator address: %s -> %s",
+                                self.recipient_address.hex(), fresh.hex(),
+                            )
+                            self.recipient_address = fresh
+                    break
             client = await establish_connection(
                 BleakClient, ble_device, self.mac_address
             )

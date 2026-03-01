@@ -43,9 +43,8 @@ def mock_ble_api():
         instance.pair = AsyncMock(return_value=False)
         instance.subscribe = AsyncMock()
         instance.read_characteristic = AsyncMock(return_value=None)
-        instance.sender_address = b"\x01\x00\x00\x00\x00\x01"
-        instance.recipient_address = b"\xaa\xbb\xcc\xdd\xee\xff"
-        instance.recipient_address_reversed = b"\xff\xee\xdd\xcc\xbb\xaa"
+        instance.sender_address = bytes.fromhex("aabbaabbaabbaabb")
+        instance.recipient_address = bytes.fromhex("a0a3a8e5addc0102")
         mock_cls.return_value = instance
         yield instance
 
