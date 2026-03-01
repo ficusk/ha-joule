@@ -247,156 +247,157 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return data
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Diagnostic v0.8.8: Pair with recovery, then test protobuf.
+        """Diagnostic v0.8.10: Try different chars, formats, and sequences.
 
-        v0.8.7 revealed the connection goes through an ESPHome BLE proxy
-        (btproxy02) which cannot perform pairing.  The pair() call kills
-        the connection.  This version:
-        1. Logs adapter details (local vs proxy)
-        2. Attempts pair — if it kills the connection, reconnects
-        3. After (re-)connection, subscribes and writes protobuf
-        4. Waits for notification with keepalive polling
+        Pairing confirmed non-functional (Joule rejects it).  This version
+        tries every remaining theory:
+        1. Write to 4322 BEFORE subscribing to 4325
+        2. Write to 4326 (write-without-response) instead of 4322
+        3. Try end=True + sender + handle=1 (full StreamMessage)
+        4. Try IdentifyCirculatorRequest (the "hello" message)
+        5. Try raw protobuf without StreamMessage envelope
         """
         try:
-            # === STEP 1: Connect + log adapter info ===
             reconnected = await self.api.ensure_connected()
             if reconnected:
                 _LOGGER.warning("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
                 self._authenticated = False
 
-            # === STEP 2: Attempt BLE pairing ===
-            _LOGGER.warning("=== STEP 2: BLE pairing attempt ===")
-            pair_ok = await self.api.pair()
-            _LOGGER.warning("Pair returned: %s", pair_ok)
-
-            # Check if connection survived pairing
-            connected = (
-                self.api._client is not None
-                and self.api._client.is_connected
+            from .joule_proto import (
+                StreamMessage, Ping, BeginLiveFeedRequest,
+                IdentifyCirculatorRequest, encode_stream_message,
+                encode_field_bytes, FIELD_PING,
             )
+            from .const import FILE_CHAR_UUID as F4326
+
+            recipient = self.api.recipient_address
+            sender = self.api.sender_address
+
+            # === STEP 1: Write BEFORE subscribing ===
+            _LOGGER.warning("=== STEP 1: Write Ping BEFORE subscribe ===")
+            ping_full = encode_stream_message(StreamMessage(
+                handle=1, end=True,
+                sender_address=sender,
+                recipient_address=recipient,
+                ping=Ping(),
+            ))
             _LOGGER.warning(
-                "Connection after pair: %s",
-                "ALIVE" if connected else "DEAD — will reconnect",
+                "WRITE Ping (full) → 4322 (%d bytes): %s",
+                len(ping_full), ping_full.hex(),
             )
+            await self.api.write_message(ping_full)
+            _LOGGER.warning("Write Ping (pre-subscribe) succeeded")
 
-            if not connected:
-                # Pairing killed the connection — reconnect
-                _LOGGER.warning("Reconnecting after pair...")
-                self.api._client = None  # clear stale client
-                await self.api.connect()
-                self._subscribed = False
-                _LOGGER.warning("Reconnected successfully")
+            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 pre-sub")
+            await self._read_and_log(READ_CHAR_UUID, "4323 pre-sub")
 
-            # === STEP 3: Subscribe + baseline reads ===
-            _LOGGER.warning("=== STEP 3: Subscribe + baseline ===")
+            # === STEP 2: Now subscribe ===
+            _LOGGER.warning("=== STEP 2: Subscribe ===")
             if not self._subscribed:
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
 
-            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "BASELINE 4325")
-            await self._read_and_log(READ_CHAR_UUID, "BASELINE 4323")
+            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 post-sub")
+            await self._read_and_log(READ_CHAR_UUID, "4323 post-sub")
 
-            # === STEP 4: Write Ping protobuf ===
-            _LOGGER.warning("=== STEP 4: Write Ping ===")
-            from .joule_proto import (
-                StreamMessage, Ping, BeginLiveFeedRequest,
-                StartKeyExchangeRequest, encode_stream_message,
+            # === STEP 3: Write to 4326 (write-without-response char) ===
+            _LOGGER.warning("=== STEP 3: Write Ping to 4326 ===")
+            _LOGGER.warning(
+                "WRITE Ping → 4326 (%d bytes): %s",
+                len(ping_full), ping_full.hex(),
+            )
+            try:
+                await self.api.write_to_file_char(ping_full)
+                _LOGGER.warning("Write Ping to 4326 succeeded")
+            except JouleBLEError as err:
+                _LOGGER.warning("Write Ping to 4326 failed: %s", err)
+
+            await asyncio.sleep(self.DIAG_SLEEP)
+            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 after 4326")
+            await self._read_and_log(READ_CHAR_UUID, "4323 after 4326")
+
+            # === STEP 4: IdentifyCirculatorRequest (the "hello") ===
+            _LOGGER.warning("=== STEP 4: IdentifyCirculatorRequest ===")
+            identify = encode_stream_message(StreamMessage(
+                handle=1, end=True,
+                sender_address=sender,
+                recipient_address=recipient,
+                identify_circulator_request=IdentifyCirculatorRequest(),
+            ))
+            _LOGGER.warning(
+                "WRITE IdentifyCirculator → 4322 (%d bytes): %s",
+                len(identify), identify.hex(),
+            )
+            await self.api.write_message(identify)
+            _LOGGER.warning("Write IdentifyCirculator succeeded")
+
+            await asyncio.sleep(self.DIAG_SLEEP)
+            await self._read_and_log(
+                SUBSCRIBE_CHAR_UUID, "4325 after Identify",
+            )
+            await self._read_and_log(READ_CHAR_UUID, "4323 after Identify")
+
+            # Also try IdentifyCirculator to 4326
+            _LOGGER.warning("WRITE IdentifyCirculator → 4326")
+            try:
+                await self.api.write_to_file_char(identify)
+                _LOGGER.warning("Write IdentifyCirculator to 4326 succeeded")
+            except JouleBLEError as err:
+                _LOGGER.warning("IdentifyCirculator to 4326 failed: %s", err)
+
+            await asyncio.sleep(self.DIAG_SLEEP)
+            await self._read_and_log(
+                SUBSCRIBE_CHAR_UUID, "4325 after Identify-4326",
+            )
+            await self._read_and_log(
+                READ_CHAR_UUID, "4323 after Identify-4326",
             )
 
-            recipient = self.api.recipient_address
-            payload_ping = encode_stream_message(StreamMessage(
+            # === STEP 5: Minimal Ping — no envelope ===
+            _LOGGER.warning("=== STEP 5: Raw Ping (no envelope) ===")
+            # Just the Ping field tag + empty length: field 18, LEN, 0 bytes
+            raw_ping = encode_field_bytes(FIELD_PING, b"")
+            _LOGGER.warning(
+                "WRITE raw Ping → 4322 (%d bytes): %s",
+                len(raw_ping), raw_ping.hex(),
+            )
+            await self.api.write_message(raw_ping)
+            _LOGGER.warning("Write raw Ping succeeded")
+
+            await self._read_and_log(
+                SUBSCRIBE_CHAR_UUID, "4325 after raw Ping",
+            )
+            await self._read_and_log(
+                READ_CHAR_UUID, "4323 after raw Ping",
+            )
+
+            # === STEP 6: Ping with minimal envelope (handle=0 only) ===
+            _LOGGER.warning("=== STEP 6: Ping minimal envelope ===")
+            ping_min = encode_stream_message(StreamMessage(
                 handle=0, end=False,
                 recipient_address=recipient,
                 ping=Ping(),
             ))
             _LOGGER.warning(
-                "WRITE Ping → 4322 (%d bytes): %s",
-                len(payload_ping), payload_ping.hex(),
+                "WRITE Ping (minimal) → 4322 (%d bytes): %s",
+                len(ping_min), ping_min.hex(),
             )
-            await self.api.write_message(payload_ping)
-            _LOGGER.warning("Write Ping succeeded")
-
-            # Immediate read
-            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 after Ping")
-            await self._read_and_log(READ_CHAR_UUID, "4323 after Ping")
-
-            # Wait 2s for async response
-            await asyncio.sleep(self.DIAG_SLEEP)
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 2s after Ping",
-            )
-            await self._read_and_log(READ_CHAR_UUID, "4323 2s after Ping")
-
-            # === STEP 5: Write StartKeyExchange ===
-            _LOGGER.warning("=== STEP 5: Write StartKeyExchange ===")
-            payload_ke = encode_stream_message(StreamMessage(
-                handle=0, end=False,
-                recipient_address=recipient,
-                start_key_exchange_request=StartKeyExchangeRequest(),
-            ))
-            _LOGGER.warning(
-                "WRITE StartKeyExchange → 4322 (%d bytes): %s",
-                len(payload_ke), payload_ke.hex(),
-            )
-            await self.api.write_message(payload_ke)
-            _LOGGER.warning("Write StartKeyExchange succeeded")
+            await self.api.write_message(ping_min)
+            _LOGGER.warning("Write Ping (minimal) succeeded")
 
             await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 after KeyExchange",
+                SUBSCRIBE_CHAR_UUID, "4325 after min Ping",
             )
             await self._read_and_log(
-                READ_CHAR_UUID, "4323 after KeyExchange",
+                READ_CHAR_UUID, "4323 after min Ping",
             )
 
-            # Wait 5s — key exchange may need button press
-            _LOGGER.warning("Waiting 5s for key exchange response...")
-            await asyncio.sleep(self.DIAG_SLEEP)
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 5s after KeyExchange",
-            )
-            await self._read_and_log(
-                READ_CHAR_UUID, "4323 5s after KeyExchange",
-            )
-
-            # === STEP 6: Write BeginLiveFeed ===
-            _LOGGER.warning("=== STEP 6: Write BeginLiveFeed ===")
-            payload_lf = encode_stream_message(StreamMessage(
-                handle=0, end=False,
-                recipient_address=recipient,
-                begin_live_feed_request=BeginLiveFeedRequest(),
-            ))
-            _LOGGER.warning(
-                "WRITE BeginLiveFeed → 4322 (%d bytes): %s",
-                len(payload_lf), payload_lf.hex(),
-            )
-            await self.api.write_message(payload_lf)
-            _LOGGER.warning("Write BeginLiveFeed succeeded")
-
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 after LiveFeed",
-            )
-            await self._read_and_log(
-                READ_CHAR_UUID, "4323 after LiveFeed",
-            )
-
-            # Wait 2s
-            await asyncio.sleep(self.DIAG_SLEEP)
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 2s after LiveFeed",
-            )
-            await self._read_and_log(
-                READ_CHAR_UUID, "4323 2s after LiveFeed",
-            )
-
-            # === Summary: check notification flag ===
+            # === Summary ===
             if self._notification_received.is_set():
                 _LOGGER.warning("SUCCESS: notification was received!")
             else:
-                _LOGGER.warning(
-                    "No notification received. Check logs for adapter type "
-                    "(proxy vs local).",
-                )
+                _LOGGER.warning("No notification received in any variant.")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
