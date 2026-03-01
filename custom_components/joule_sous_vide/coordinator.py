@@ -19,6 +19,7 @@ from .const import (
     DEFAULT_TEMPERATURE_UNIT,
     DOMAIN,
     READ_CHAR_UUID,
+    SUBSCRIBE_CHAR_UUID,
 )
 from .joule_ble import JouleBLEAPI, JouleBLEError
 from .joule_proto import (
@@ -196,7 +197,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning("Write failed for %s: %s", label, err)
             return False
 
-        # Poll: wait for notification OR check 4323 every 5 seconds
+        # Poll: wait for notification OR check 4323+4325 every 5 seconds
         elapsed = 0.0
         poll_interval = 5.0
         while elapsed < timeout:
@@ -209,20 +210,26 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except TimeoutError:
                 elapsed += wait_time
 
-            # Keep connection alive + check for data on 4323
-            read_data = await self.api.read_characteristic(READ_CHAR_UUID)
-            if read_data and len(read_data) > 0:
-                _LOGGER.warning(
-                    "Poll READ after %s: %d bytes: %s",
-                    label, len(read_data), read_data.hex(),
-                )
-                self._try_decode_message(read_data, source=f"4323-poll-{label}")
-                if self._notification_received.is_set():
-                    return True
-            else:
-                _LOGGER.warning(
-                    "Poll READ after %s at %.0fs: empty", label, elapsed,
-                )
+            # Read BOTH 4323 and 4325 — response could be on either
+            for char_uuid, char_name in [
+                (READ_CHAR_UUID, "4323"),
+                (SUBSCRIBE_CHAR_UUID, "4325"),
+            ]:
+                read_data = await self.api.read_characteristic(char_uuid)
+                if read_data and len(read_data) > 0:
+                    _LOGGER.warning(
+                        "Poll %s after %s: %d bytes: %s",
+                        char_name, label, len(read_data), read_data.hex(),
+                    )
+                    self._try_decode_message(
+                        read_data, source=f"{char_name}-poll-{label}",
+                    )
+                    if self._notification_received.is_set():
+                        return True
+
+            _LOGGER.warning(
+                "Poll after %s at %.0fs: both empty", label, elapsed,
+            )
 
         _LOGGER.warning("No response to %s after %.0fs", label, timeout)
         return False
@@ -271,61 +278,84 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             recipient = self.api.recipient_address
 
-            # --- Try multiple framing variants ---
-            # The SDK only sets recipientAddress + oneof field.
-            # Proto2 defaults: handle=0, end=false, senderAddress=empty.
             from .joule_proto import StreamMessage, BeginLiveFeedRequest, \
-                StartKeyExchangeRequest, Ping, encode_stream_message
+                Ping, encode_stream_message
 
-            attempts = [
-                (
-                    "A: BeginLiveFeed (minimal — no sender, handle=0, end=false)",
-                    StreamMessage(
-                        handle=0, end=False,
-                        recipient_address=recipient,
-                        begin_live_feed_request=BeginLiveFeedRequest(),
-                    ),
-                ),
-                (
-                    "B: Ping (minimal — no sender, handle=0, end=false)",
-                    StreamMessage(
-                        handle=0, end=False,
-                        recipient_address=recipient,
-                        ping=Ping(),
-                    ),
-                ),
-                (
-                    "C: StartKeyExchange (minimal — no sender, handle=0, end=false)",
-                    StreamMessage(
-                        handle=0, end=False,
-                        recipient_address=recipient,
-                        start_key_exchange_request=StartKeyExchangeRequest(),
-                    ),
-                ),
-                (
-                    "D: BeginLiveFeed (handle=1, end=true, with sender)",
-                    StreamMessage(
-                        handle=1, end=True,
-                        sender_address=self.api.sender_address,
-                        recipient_address=recipient,
-                        begin_live_feed_request=BeginLiveFeedRequest(),
-                    ),
-                ),
-            ]
-
-            for label, msg in attempts:
-                if self._notification_received.is_set():
-                    break
-                payload = encode_stream_message(msg)
-                got_reply = await self._try_write_and_wait(
-                    label, payload, self.NOTIFICATION_TIMEOUT,
-                )
-                if got_reply:
-                    _LOGGER.warning("SUCCESS with %s", label)
-                    break
-
+            # --- Attempt A: Ping (minimal, write-with-response to 4322) ---
             if not self._notification_received.is_set():
-                _LOGGER.warning("No response from any message variant")
+                payload_a = encode_stream_message(StreamMessage(
+                    handle=0, end=False,
+                    recipient_address=recipient,
+                    ping=Ping(),
+                ))
+                await self._try_write_and_wait(
+                    "A: Ping minimal → 4322", payload_a, self.NOTIFICATION_TIMEOUT,
+                )
+
+            # --- Attempt B: BeginLiveFeed (minimal, to 4322) ---
+            if not self._notification_received.is_set():
+                payload_b = encode_stream_message(StreamMessage(
+                    handle=0, end=False,
+                    recipient_address=recipient,
+                    begin_live_feed_request=BeginLiveFeedRequest(),
+                ))
+                await self._try_write_and_wait(
+                    "B: BeginLiveFeed minimal → 4322",
+                    payload_b, self.NOTIFICATION_TIMEOUT,
+                )
+
+            # --- Attempt C: raw 0x0801 (inner Ping bytes, no envelope) ---
+            if not self._notification_received.is_set():
+                await self._try_write_and_wait(
+                    "C: raw 0x0801 → 4322",
+                    b"\x08\x01", self.NOTIFICATION_TIMEOUT,
+                )
+
+            # --- Attempt D: Ping minimal → 4326 (write-without-response) ---
+            if not self._notification_received.is_set():
+                payload_d = encode_stream_message(StreamMessage(
+                    handle=0, end=False,
+                    recipient_address=recipient,
+                    ping=Ping(),
+                ))
+                _LOGGER.warning(
+                    "D: Ping minimal → 4326 (%d bytes): %s",
+                    len(payload_d), payload_d.hex(),
+                )
+                self._notification_received.clear()
+                try:
+                    await self.api.write_to_file_char(payload_d)
+                    _LOGGER.warning("Write to 4326 succeeded for D")
+                    # Brief pause, then poll
+                    await asyncio.sleep(0.5)
+                    for char_uuid, cname in [
+                        (READ_CHAR_UUID, "4323"),
+                        (SUBSCRIBE_CHAR_UUID, "4325"),
+                    ]:
+                        rd = await self.api.read_characteristic(char_uuid)
+                        if rd and len(rd) > 0:
+                            _LOGGER.warning(
+                                "D poll %s: %d bytes: %s",
+                                cname, len(rd), rd.hex(),
+                            )
+                            self._try_decode_message(rd, source=f"{cname}-D")
+                        else:
+                            _LOGGER.warning("D poll %s: empty", cname)
+                except JouleBLEError as err:
+                    _LOGGER.warning("D: write to 4326 failed: %s", err)
+
+            # --- Attempt E: write 4324 nonce back to 4322 ---
+            if not self._notification_received.is_set():
+                nonce = bytes(range(20))  # 000102...13
+                await self._try_write_and_wait(
+                    "E: 4324 nonce echoed → 4322",
+                    nonce, self.NOTIFICATION_TIMEOUT,
+                )
+
+            if self._notification_received.is_set():
+                _LOGGER.warning("SUCCESS — got a response!")
+            else:
+                _LOGGER.warning("No response from any attempt")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
