@@ -219,7 +219,12 @@ class JouleBLEAPI:
             )
             self._client = client
             _LOGGER.warning("Connected to Joule at %s", self.mac_address)
-            # Dump GATT services at WARNING level so they always appear
+
+            # Step 1: Attempt BLE pairing to establish encrypted link.
+            # The Joule may silently ignore writes on unencrypted connections.
+            await self._try_pair()
+
+            # Step 2: Dump ALL GATT services, characteristics, AND descriptors
             for service in client.services:
                 _LOGGER.warning("  Service: %s", service.uuid)
                 for char in service.characteristics:
@@ -230,6 +235,26 @@ class JouleBLEAPI:
                         props,
                         char.handle,
                     )
+                    # Log all descriptors for each characteristic
+                    for desc in char.descriptors:
+                        _LOGGER.warning(
+                            "      Desc: %s handle=%s", desc.uuid, desc.handle,
+                        )
+                        # Read descriptor value (especially CCCD 0x2902)
+                        try:
+                            desc_val = await client.read_gatt_descriptor(
+                                desc.handle
+                            )
+                            _LOGGER.warning(
+                                "      Desc value: %s", bytes(desc_val).hex(),
+                            )
+                        except BleakError as err:
+                            _LOGGER.warning(
+                                "      Desc read failed: %s", err,
+                            )
+
+            # Step 3: Read ALL readable characteristics for diagnostics
+            await self._read_all_characteristics()
         except BleakError as err:
             self._client = None
             raise JouleBLEError(f"Failed to connect to {self.mac_address}") from err
@@ -240,6 +265,55 @@ class JouleBLEAPI:
             raise JouleBLEError(
                 f"BLE backend error for {self.mac_address}: {err}"
             ) from err
+
+    async def _try_pair(self) -> None:
+        """Attempt BLE pairing/bonding to establish an encrypted link.
+
+        The Joule may require an encrypted BLE link before processing GATT
+        writes.  "Just Works" pairing (no PIN) should succeed per the Joule
+        protocol doc: "no pin or security requirement for pairing."
+        """
+        try:
+            _LOGGER.warning("Attempting BLE pair with %s ...", self.mac_address)
+            result = await self._client.pair()
+            _LOGGER.warning("Pair result: %s", result)
+        except (BleakError, Exception) as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Pair failed (will continue without encryption): %s", err,
+            )
+
+    async def _read_all_characteristics(self) -> None:
+        """Read ALL readable characteristics and log their values.
+
+        This provides diagnostics and may reveal the circulator address
+        in one of the GAP or device-specific characteristics.
+        """
+        READABLE_CHARS = [
+            ("DeviceName", "00002a00-0000-1000-8000-00805f9b34fb"),
+            ("Appearance", "00002a01-0000-1000-8000-00805f9b34fb"),
+            ("PPCP", "00002a04-0000-1000-8000-00805f9b34fb"),
+            ("4323-read", READ_CHAR_UUID),
+            ("4324-unknown", "700b4324-9836-4383-a2b2-31a9098d1473"),
+            ("4325-subscribe", SUBSCRIBE_CHAR_UUID),
+        ]
+        for label, uuid in READABLE_CHARS:
+            try:
+                data = await self._client.read_gatt_char(uuid)
+                raw = bytes(data)
+                # Try to decode as UTF-8 for text characteristics
+                try:
+                    text = raw.decode("utf-8")
+                    _LOGGER.warning(
+                        "READ %s: %d bytes, hex=%s, text='%s'",
+                        label, len(raw), raw.hex(), text,
+                    )
+                except UnicodeDecodeError:
+                    _LOGGER.warning(
+                        "READ %s: %d bytes, hex=%s",
+                        label, len(raw), raw.hex(),
+                    )
+            except BleakError as err:
+                _LOGGER.warning("READ %s failed: %s", label, err)
 
     async def disconnect(self) -> None:
         """Close the BLE connection."""
