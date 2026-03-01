@@ -159,7 +159,6 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._notification_received.set()
         except Exception:  # noqa: BLE001
             _LOGGER.warning("Failed to decode message from %s: %s", source, data.hex())
-            self._notification_received.set()
 
     def _persist_auth_key(self, key: bytes) -> None:
         """Save the BLE auth key to config entry options for future connections."""
