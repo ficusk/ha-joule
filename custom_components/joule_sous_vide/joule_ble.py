@@ -103,18 +103,77 @@ class JouleBLEAPI:
         await self.connect()
         return True
 
+    def _find_best_ble_device(self) -> tuple:
+        """Find the best BLEDevice, preferring local adapters over proxies.
+
+        ESPHome Bluetooth Proxies may not support notifications, MTU exchange,
+        or manufacturer data forwarding.  Local BlueZ adapters (hci0/hci1)
+        handle all of these correctly.
+
+        Returns (ble_device, source, is_local).
+        """
+        local_device = None
+        local_source = None
+        proxy_device = None
+        proxy_source = None
+
+        for info in async_discovered_service_info(self._hass, connectable=True):
+            if info.address.upper() != self.mac_address.upper():
+                continue
+
+            source = info.source
+            # Local BlueZ adapters have MAC-formatted sources (XX:XX:XX:XX:XX:XX)
+            # ESPHome proxies have config entry ID sources (hex without colons)
+            is_local = ":" in source and len(source) == 17
+
+            _LOGGER.warning(
+                "Joule seen by source=%s type=%s rssi=%s mfr_keys=%s",
+                source,
+                "LOCAL" if is_local else "PROXY",
+                getattr(info, "rssi", "N/A"),
+                list(info.manufacturer_data.keys()),
+            )
+
+            # Refresh circulator address from manufacturer data if available
+            if JOULE_MANUFACTURER_ID in info.manufacturer_data:
+                addr = bytes(info.manufacturer_data[JOULE_MANUFACTURER_ID])
+                if len(addr) >= 8:
+                    self.recipient_address = addr[:8]
+                    _LOGGER.warning(
+                        "Updated circulator address from %s: %s",
+                        source, self.recipient_address.hex(),
+                    )
+
+            if is_local:
+                local_device = info.device
+                local_source = source
+            else:
+                proxy_device = info.device
+                proxy_source = source
+
+        if local_device:
+            return local_device, local_source, True
+        if proxy_device:
+            return proxy_device, proxy_source, False
+
+        # Fallback to HA's default selection
+        fallback = async_ble_device_from_address(
+            self._hass, self.mac_address, connectable=True
+        )
+        return fallback, "default", False
+
     async def connect(self) -> None:
         """Open a BLE connection to the device via HA's bluetooth stack."""
         try:
-            ble_device = async_ble_device_from_address(
-                self._hass, self.mac_address, connectable=True
-            )
+            ble_device, source, is_local = self._find_best_ble_device()
             if ble_device is None:
                 raise JouleBLEError(
                     f"Device {self.mac_address} not found by bluetooth scanner"
                 )
             _LOGGER.warning(
-                "BLEDevice: name=%s, rssi=%s",
+                "Connecting via %s (%s) name=%s rssi=%s",
+                source,
+                "LOCAL" if is_local else "PROXY",
                 ble_device.name,
                 getattr(ble_device, "rssi", "N/A"),
             )
