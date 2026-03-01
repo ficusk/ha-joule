@@ -281,81 +281,127 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             from .joule_proto import StreamMessage, BeginLiveFeedRequest, \
                 Ping, encode_stream_message
 
-            # --- Attempt A: Ping (minimal, write-with-response to 4322) ---
-            if not self._notification_received.is_set():
-                payload_a = encode_stream_message(StreamMessage(
-                    handle=0, end=False,
-                    recipient_address=recipient,
-                    ping=Ping(),
-                ))
-                await self._try_write_and_wait(
-                    "A: Ping minimal → 4322", payload_a, self.NOTIFICATION_TIMEOUT,
-                )
+            # --- Baseline: read 4325 BEFORE any writes ---
+            baseline = await self.api.read_characteristic(SUBSCRIBE_CHAR_UUID)
+            _LOGGER.warning(
+                "BASELINE 4325: %d bytes: %s",
+                len(baseline) if baseline else 0,
+                baseline.hex() if baseline else "(empty)",
+            )
 
-            # --- Attempt B: BeginLiveFeed (minimal, to 4322) ---
-            if not self._notification_received.is_set():
-                payload_b = encode_stream_message(StreamMessage(
-                    handle=0, end=False,
-                    recipient_address=recipient,
-                    begin_live_feed_request=BeginLiveFeedRequest(),
-                ))
-                await self._try_write_and_wait(
-                    "B: BeginLiveFeed minimal → 4322",
-                    payload_b, self.NOTIFICATION_TIMEOUT,
-                )
+            # --- Write Ping, then IMMEDIATELY read 4325 ---
+            payload_ping = encode_stream_message(StreamMessage(
+                handle=0, end=False,
+                recipient_address=recipient,
+                ping=Ping(),
+            ))
+            _LOGGER.warning(
+                "WRITE Ping → 4322 (%d bytes): %s",
+                len(payload_ping), payload_ping.hex(),
+            )
+            await self.api.write_message(payload_ping)
+            _LOGGER.warning("Write Ping succeeded")
 
-            # --- Attempt C: raw 0x0801 (inner Ping bytes, no envelope) ---
-            if not self._notification_received.is_set():
-                await self._try_write_and_wait(
-                    "C: raw 0x0801 → 4322",
-                    b"\x08\x01", self.NOTIFICATION_TIMEOUT,
-                )
+            # Immediate reads (no delay)
+            r1_4325 = await self.api.read_characteristic(SUBSCRIBE_CHAR_UUID)
+            _LOGGER.warning(
+                "IMMEDIATE 4325 after Ping: %d bytes: %s",
+                len(r1_4325) if r1_4325 else 0,
+                r1_4325.hex() if r1_4325 else "(empty)",
+            )
+            r1_4323 = await self.api.read_characteristic(READ_CHAR_UUID)
+            _LOGGER.warning(
+                "IMMEDIATE 4323 after Ping: %d bytes: %s",
+                len(r1_4323) if r1_4323 else 0,
+                r1_4323.hex() if r1_4323 else "(empty)",
+            )
 
-            # --- Attempt D: Ping minimal → 4326 (write-without-response) ---
-            if not self._notification_received.is_set():
-                payload_d = encode_stream_message(StreamMessage(
-                    handle=0, end=False,
-                    recipient_address=recipient,
-                    ping=Ping(),
-                ))
-                _LOGGER.warning(
-                    "D: Ping minimal → 4326 (%d bytes): %s",
-                    len(payload_d), payload_d.hex(),
-                )
-                self._notification_received.clear()
-                try:
-                    await self.api.write_to_file_char(payload_d)
-                    _LOGGER.warning("Write to 4326 succeeded for D")
-                    # Brief pause, then poll
-                    await asyncio.sleep(0.5)
-                    for char_uuid, cname in [
-                        (READ_CHAR_UUID, "4323"),
-                        (SUBSCRIBE_CHAR_UUID, "4325"),
-                    ]:
-                        rd = await self.api.read_characteristic(char_uuid)
-                        if rd and len(rd) > 0:
-                            _LOGGER.warning(
-                                "D poll %s: %d bytes: %s",
-                                cname, len(rd), rd.hex(),
-                            )
-                            self._try_decode_message(rd, source=f"{cname}-D")
-                        else:
-                            _LOGGER.warning("D poll %s: empty", cname)
-                except JouleBLEError as err:
-                    _LOGGER.warning("D: write to 4326 failed: %s", err)
+            # Wait 1 second, read again
+            await asyncio.sleep(1)
+            r2_4325 = await self.api.read_characteristic(SUBSCRIBE_CHAR_UUID)
+            _LOGGER.warning(
+                "1s 4325 after Ping: %d bytes: %s",
+                len(r2_4325) if r2_4325 else 0,
+                r2_4325.hex() if r2_4325 else "(empty)",
+            )
+            r2_4323 = await self.api.read_characteristic(READ_CHAR_UUID)
+            _LOGGER.warning(
+                "1s 4323 after Ping: %d bytes: %s",
+                len(r2_4323) if r2_4323 else 0,
+                r2_4323.hex() if r2_4323 else "(empty)",
+            )
 
-            # --- Attempt E: write 4324 nonce back to 4322 ---
-            if not self._notification_received.is_set():
-                nonce = bytes(range(20))  # 000102...13
-                await self._try_write_and_wait(
-                    "E: 4324 nonce echoed → 4322",
-                    nonce, self.NOTIFICATION_TIMEOUT,
-                )
+            # --- Write BeginLiveFeed, then IMMEDIATELY read ---
+            payload_lf = encode_stream_message(StreamMessage(
+                handle=0, end=False,
+                recipient_address=recipient,
+                begin_live_feed_request=BeginLiveFeedRequest(),
+            ))
+            _LOGGER.warning(
+                "WRITE BeginLiveFeed → 4322 (%d bytes): %s",
+                len(payload_lf), payload_lf.hex(),
+            )
+            await self.api.write_message(payload_lf)
+            _LOGGER.warning("Write BeginLiveFeed succeeded")
 
-            if self._notification_received.is_set():
-                _LOGGER.warning("SUCCESS — got a response!")
-            else:
-                _LOGGER.warning("No response from any attempt")
+            r3_4325 = await self.api.read_characteristic(SUBSCRIBE_CHAR_UUID)
+            _LOGGER.warning(
+                "IMMEDIATE 4325 after LiveFeed: %d bytes: %s",
+                len(r3_4325) if r3_4325 else 0,
+                r3_4325.hex() if r3_4325 else "(empty)",
+            )
+            r3_4323 = await self.api.read_characteristic(READ_CHAR_UUID)
+            _LOGGER.warning(
+                "IMMEDIATE 4323 after LiveFeed: %d bytes: %s",
+                len(r3_4323) if r3_4323 else 0,
+                r3_4323.hex() if r3_4323 else "(empty)",
+            )
+
+            # --- Write StartKeyExchange, then read ---
+            from .joule_proto import StartKeyExchangeRequest
+            payload_ke = encode_stream_message(StreamMessage(
+                handle=0, end=False,
+                recipient_address=recipient,
+                start_key_exchange_request=StartKeyExchangeRequest(),
+            ))
+            _LOGGER.warning(
+                "WRITE StartKeyExchange → 4322 (%d bytes): %s",
+                len(payload_ke), payload_ke.hex(),
+            )
+            await self.api.write_message(payload_ke)
+            _LOGGER.warning("Write StartKeyExchange succeeded")
+
+            r4_4325 = await self.api.read_characteristic(SUBSCRIBE_CHAR_UUID)
+            _LOGGER.warning(
+                "IMMEDIATE 4325 after KeyExchange: %d bytes: %s",
+                len(r4_4325) if r4_4325 else 0,
+                r4_4325.hex() if r4_4325 else "(empty)",
+            )
+            r4_4323 = await self.api.read_characteristic(READ_CHAR_UUID)
+            _LOGGER.warning(
+                "IMMEDIATE 4323 after KeyExchange: %d bytes: %s",
+                len(r4_4323) if r4_4323 else 0,
+                r4_4323.hex() if r4_4323 else "(empty)",
+            )
+
+            # --- Read 4324 again to see if nonce changed ---
+            char_4324 = "700b4324-9836-4383-a2b2-31a9098d1473"
+            data_4324 = await self.api.read_characteristic(char_4324)
+            _LOGGER.warning(
+                "4324 after writes: %d bytes: %s",
+                len(data_4324) if data_4324 else 0,
+                data_4324.hex() if data_4324 else "(empty)",
+            )
+
+            # Process any non-empty reads
+            for data, source in [
+                (r1_4325, "4325-imm-ping"), (r1_4323, "4323-imm-ping"),
+                (r2_4325, "4325-1s-ping"), (r2_4323, "4323-1s-ping"),
+                (r3_4325, "4325-imm-lf"), (r3_4323, "4323-imm-lf"),
+                (r4_4325, "4325-imm-ke"), (r4_4323, "4323-imm-ke"),
+            ]:
+                if data and len(data) > 0:
+                    self._try_decode_message(data, source=source)
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
