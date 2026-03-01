@@ -283,16 +283,44 @@ class JouleBLEAPI:
         before it will process any application-level commands.  The official
         iOS app writes 0x0200 (enable indications) to the CCCD on 0x2A05 as
         the very first GATT operation after connecting.
+
+        On BlueZ, raw CCCD descriptor writes on 0x2A05 return NotPermitted
+        because the GATT service requires encryption.  Using start_notify()
+        goes through BlueZ's StartNotify D-Bus API which handles encryption
+        negotiation transparently (same as CoreBluetooth on iOS).
         """
         if self._client is None:
             return False
 
         service_changed_uuid = "00002a05-0000-1000-8000-00805f9b34fb"
-        cccd_uuid = "00002902-0000-1000-8000-00805f9b34fb"
 
         for service in self._client.services:
             for char in service.characteristics:
                 if char.uuid == service_changed_uuid:
+                    # Method 1: start_notify() — uses BlueZ StartNotify D-Bus
+                    # API which handles encryption and CCCD writes internally.
+                    # This enables indications (0x0200) for indicate-capable
+                    # chars, or notifications (0x0100) for notify-capable chars.
+                    try:
+                        await self._client.start_notify(
+                            char, lambda _c, _d: None,
+                        )
+                        _LOGGER.warning(
+                            "Service Changed indications enabled via "
+                            "start_notify (uuid=%s)",
+                            char.uuid,
+                        )
+                        return True
+                    except BleakError as err:
+                        _LOGGER.warning(
+                            "start_notify on 0x2A05 failed: %s — "
+                            "trying raw CCCD write",
+                            err,
+                        )
+
+                    # Method 2: fallback to raw CCCD write (may work on
+                    # non-BlueZ platforms like macOS/Windows)
+                    cccd_uuid = "00002902-0000-1000-8000-00805f9b34fb"
                     for desc in char.descriptors:
                         if desc.uuid == cccd_uuid:
                             try:
@@ -301,17 +329,16 @@ class JouleBLEAPI:
                                 )
                                 _LOGGER.warning(
                                     "Service Changed indications enabled "
-                                    "(handle %d)",
+                                    "via raw CCCD write (handle %d)",
                                     desc.handle,
                                 )
                                 return True
-                            except BleakError as err:
+                            except BleakError as err2:
                                 _LOGGER.warning(
-                                    "Failed to enable Service Changed "
-                                    "indications: %s",
-                                    err,
+                                    "Raw CCCD write also failed: %s", err2,
                                 )
                                 return False
+
                     _LOGGER.warning(
                         "Service Changed char found but no CCCD descriptor"
                     )
