@@ -439,9 +439,11 @@ _DEFAULT_ADDRESS = b"\x00" * 6
 def build_start_key_exchange_message(
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
+    handle: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a StartKeyExchangeRequest."""
     msg = StreamMessage(
+        handle=handle,
         sender_address=sender,
         recipient_address=recipient,
         start_key_exchange_request=StartKeyExchangeRequest(),
@@ -453,9 +455,11 @@ def build_submit_key_message(
     secret_key: bytes,
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
+    handle: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a SubmitKeyRequest."""
     msg = StreamMessage(
+        handle=handle,
         sender_address=sender,
         recipient_address=recipient,
         submit_key_request=SubmitKeyRequest(secret_key=secret_key),
@@ -466,9 +470,11 @@ def build_submit_key_message(
 def build_ping_message(
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
+    handle: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a Ping."""
     msg = StreamMessage(
+        handle=handle,
         sender_address=sender,
         recipient_address=recipient,
         ping=Ping(),
@@ -481,6 +487,7 @@ def build_start_cook_message(
     cook_time_seconds: int,
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
+    handle: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a StartProgramRequest."""
     program = CirculatorProgram(
@@ -489,6 +496,7 @@ def build_start_cook_message(
         program_type=ProgramType.MANUAL,
     )
     msg = StreamMessage(
+        handle=handle,
         sender_address=sender,
         recipient_address=recipient,
         start_program_request=StartProgramRequest(circulator_program=program),
@@ -499,9 +507,11 @@ def build_start_cook_message(
 def build_stop_cook_message(
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
+    handle: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a StopCirculatorRequest."""
     msg = StreamMessage(
+        handle=handle,
         sender_address=sender,
         recipient_address=recipient,
         stop_circulator_request=StopCirculatorRequest(),
@@ -512,9 +522,11 @@ def build_stop_cook_message(
 def build_identify_circulator_message(
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
+    handle: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing an IdentifyCirculatorRequest."""
     msg = StreamMessage(
+        handle=handle,
         sender_address=sender,
         recipient_address=recipient,
         identify_circulator_request=IdentifyCirculatorRequest(),
@@ -526,9 +538,11 @@ def build_live_feed_message(
     feed_id: int = 1,
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
+    handle: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a BeginLiveFeedRequest."""
     msg = StreamMessage(
+        handle=handle,
         sender_address=sender,
         recipient_address=recipient,
         begin_live_feed_request=BeginLiveFeedRequest(feed_id=feed_id),

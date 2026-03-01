@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import logging
+import random
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -64,6 +65,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._notification_received: asyncio.Event = asyncio.Event()
         self._subscribed: bool = False
         self._authenticated: bool = False
+        self._session_handle: int = self._new_session_handle()
         # Load persisted auth key from config entry options (if previously paired)
         stored_key = entry.options.get(CONF_BLE_AUTH_KEY)
         self._auth_key: bytes | None = (
@@ -76,6 +78,16 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             name=DOMAIN,
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
+
+    @staticmethod
+    def _new_session_handle() -> int:
+        """Generate a random session handle (matches [redacted] SDK behavior).
+
+        The SDK creates one handle per session and reuses it for all messages.
+        The Joule tracks per-handle sessions — commands like StartProgramRequest
+        must arrive on the same handle that was authenticated.
+        """
+        return random.randint(1, 2**31 - 1)
 
     def _on_notification(self, characteristic: Any, data: bytearray) -> None:
         """Handle a BLE notification from bleak (runs on the event loop).
@@ -304,8 +316,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # --- Variant A: empty addresses (12 bytes) ---
             # All required fields present; addresses are zero-length bytes.
-            # Random handle + no end field (matches iOS app capture).
+            # Session handle + no end field (matches iOS app capture).
             msg_empty = StreamMessage(
+                handle=self._session_handle,
                 sender_address=b"",
                 recipient_address=b"",
                 start_key_exchange_request=StartKeyExchangeRequest(),
@@ -320,6 +333,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # --- Variant B: empty sender + 6-byte MAC recipient ---
             msg_mac6 = StreamMessage(
+                handle=self._session_handle,
                 sender_address=b"",
                 recipient_address=mac_6,
                 start_key_exchange_request=StartKeyExchangeRequest(),
@@ -335,6 +349,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             full_payload = build_start_key_exchange_message(
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
+                handle=self._session_handle,
             )
             _LOGGER.warning(
                 "KE-full (%d bytes, MTU payload=%d): %s",
@@ -383,6 +398,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             secret_key=key,
             sender=b"",
             recipient=b"",
+            handle=self._session_handle,
         )
         got_reply = await self._try_write_and_wait(
             "SubmitKey-empty-addrs", payload_empty, self.NOTIFICATION_TIMEOUT,
@@ -396,6 +412,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             secret_key=key,
             sender=self.api.sender_address,
             recipient=self.api.recipient_address,
+            handle=self._session_handle,
         )
         got_reply = await self._try_write_and_wait(
             "SubmitKey-full-addrs", payload_full, self.NOTIFICATION_TIMEOUT,
@@ -429,7 +446,11 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             reconnected = await self.api.ensure_connected()
             if reconnected:
-                _LOGGER.warning("Fresh BLE connection — will re-subscribe")
+                self._session_handle = self._new_session_handle()
+                _LOGGER.warning(
+                    "Fresh BLE connection — new session handle=%08x",
+                    self._session_handle,
+                )
                 self._subscribed = False
                 self._authenticated = False
 
@@ -500,6 +521,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 payload = build_live_feed_message(
                     sender=self.api.sender_address,
                     recipient=self.api.recipient_address,
+                    handle=self._session_handle,
                 )
                 await self._try_write_and_wait(
                     "BeginLiveFeed", payload, self.NOTIFICATION_TIMEOUT,
@@ -544,6 +566,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cook_time_seconds,
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
+                handle=self._session_handle,
             )
             await self.api.write_message(payload)
         except JouleBLEError as err:
@@ -596,6 +619,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             payload = build_stop_cook_message(
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
+                handle=self._session_handle,
             )
             await self.api.write_message(payload)
         except JouleBLEError as err:

@@ -31,27 +31,44 @@ def _copy_card_to_www(hass: HomeAssistant) -> None:
         shutil.copy2(str(LOVELACE_CARD_PATH), str(dest))
 
 
-async def _register_lovelace_resource(hass: HomeAssistant) -> None:
-    """Add the card JS as a Lovelace resource if not already present."""
+async def _register_lovelace_resource(hass: HomeAssistant) -> bool:
+    """Add the card JS as a Lovelace resource if not already present.
+
+    Returns True if the resource is registered (or was already present).
+    """
     try:
         resources = hass.data["lovelace"]["resources"]
         if resources is None:
-            return
+            _LOGGER.warning(
+                "Lovelace resources collection is None — "
+                "Lovelace may be in YAML mode"
+            )
+            return False
     except (KeyError, TypeError):
-        return
+        _LOGGER.warning(
+            "Lovelace resources not available in hass.data — "
+            "lovelace component may not be loaded yet"
+        )
+        return False
 
-    if not resources.loaded:
-        await resources.async_load()
-        resources.loaded = True
+    try:
+        if not resources.loaded:
+            await resources.async_load()
+            resources.loaded = True
 
-    for item in resources.async_items():
-        if item.get("url") == LOVELACE_LOCAL_URL:
-            return
+        for item in resources.async_items():
+            if item.get("url") == LOVELACE_LOCAL_URL:
+                _LOGGER.debug("Lovelace resource already registered")
+                return True
 
-    await resources.async_create_item(
-        {"res_type": "module", "url": LOVELACE_LOCAL_URL}
-    )
-    _LOGGER.info("Registered Lovelace resource %s", LOVELACE_LOCAL_URL)
+        await resources.async_create_item(
+            {"res_type": "module", "url": LOVELACE_LOCAL_URL}
+        )
+        _LOGGER.info("Registered Lovelace resource %s", LOVELACE_LOCAL_URL)
+        return True
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Failed to register Lovelace resource")
+        return False
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -64,9 +81,13 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     # integration was just installed via the UI), register immediately.
     # Otherwise defer until HA has started so the resource collection is loaded.
     if hass.state is CoreState.running:
+        _LOGGER.debug("HA running — registering Lovelace resource now")
         await _register_lovelace_resource(hass)
     else:
+        _LOGGER.debug("HA not yet started — deferring Lovelace resource registration")
+
         async def _on_ha_started(event: Event) -> None:
+            _LOGGER.debug("HA started event — registering Lovelace resource")
             await _register_lovelace_resource(hass)
 
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
@@ -88,6 +109,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Fallback: if async_setup's deferred registration didn't work (lovelace
+    # wasn't ready yet), try again now — async_setup_entry runs later in the
+    # boot sequence so the lovelace resources collection is more likely loaded.
+    await _register_lovelace_resource(hass)
+
     return True
 
 
