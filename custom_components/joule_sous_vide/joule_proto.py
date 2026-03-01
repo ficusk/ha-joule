@@ -33,6 +33,10 @@ FIELD_START_PROGRAM_REQUEST = 50
 FIELD_STOP_CIRCULATOR_REQUEST = 60
 FIELD_BEGIN_LIVE_FEED_REQUEST = 70
 FIELD_CIRCULATOR_DATA_POINT = 90
+FIELD_START_KEY_EXCHANGE_REQUEST = 120
+FIELD_START_KEY_EXCHANGE_REPLY = 121
+FIELD_SUBMIT_KEY_REQUEST = 130
+FIELD_SUBMIT_KEY_REPLY = 131
 FIELD_IDENTIFY_CIRCULATOR_REQUEST = 152
 
 
@@ -200,6 +204,33 @@ class StopCirculatorRequest:
 
 
 @dataclass
+class StartKeyExchangeRequest:
+    """Initiate BLE key exchange (empty body)."""
+
+
+@dataclass
+class StartKeyExchangeReply:
+    """Device response with secret key for BLE auth."""
+
+    secret_key: bytes = b""  # field 1, bytes
+    result: int = 0  # field 2, enum Result
+
+
+@dataclass
+class SubmitKeyRequest:
+    """Submit the secret key received from key exchange."""
+
+    secret_key: bytes = b""  # field 1, bytes
+
+
+@dataclass
+class SubmitKeyReply:
+    """Device response to key submission."""
+
+    result: int = 0  # field 1, enum Result
+
+
+@dataclass
 class IdentifyCirculatorRequest:
     """Identify/handshake with the circulator (empty body)."""
 
@@ -239,6 +270,10 @@ class StreamMessage:
     stop_circulator_request: StopCirculatorRequest | None = None  # field 60
     begin_live_feed_request: BeginLiveFeedRequest | None = None  # field 70
     circulator_data_point: CirculatorDataPoint | None = None  # field 90
+    start_key_exchange_request: StartKeyExchangeRequest | None = None  # field 120
+    start_key_exchange_reply: StartKeyExchangeReply | None = None  # field 121
+    submit_key_request: SubmitKeyRequest | None = None  # field 130
+    submit_key_reply: SubmitKeyReply | None = None  # field 131
     identify_circulator_request: IdentifyCirculatorRequest | None = None  # field 152
 
 
@@ -302,6 +337,11 @@ def encode_stream_message(message: StreamMessage) -> bytes:
     elif message.begin_live_feed_request is not None:
         inner = encode_begin_live_feed_request(message.begin_live_feed_request)
         result += encode_field_bytes(FIELD_BEGIN_LIVE_FEED_REQUEST, inner)
+    elif message.start_key_exchange_request is not None:
+        result += encode_field_bytes(FIELD_START_KEY_EXCHANGE_REQUEST, b"")
+    elif message.submit_key_request is not None:
+        inner = encode_field_bytes(1, message.submit_key_request.secret_key)
+        result += encode_field_bytes(FIELD_SUBMIT_KEY_REQUEST, inner)
     elif message.identify_circulator_request is not None:
         inner = encode_identify_circulator_request(
             message.identify_circulator_request
@@ -358,7 +398,27 @@ def decode_stream_message(data: bytes) -> StreamMessage:
             and wire_type == WIRETYPE_LENGTH_DELIMITED
         ):
             message.circulator_data_point = decode_circulator_data_point(value)
-        # Other oneof fields (replies, keep-alive, etc.) are silently ignored
+        elif (
+            field_number == FIELD_START_KEY_EXCHANGE_REPLY
+            and wire_type == WIRETYPE_LENGTH_DELIMITED
+        ):
+            reply = StartKeyExchangeReply()
+            for fn, wt, val in decode_fields(value):
+                if fn == 1 and wt == WIRETYPE_LENGTH_DELIMITED:
+                    reply.secret_key = val
+                elif fn == 2 and wt == WIRETYPE_VARINT:
+                    reply.result = val
+            message.start_key_exchange_reply = reply
+        elif (
+            field_number == FIELD_SUBMIT_KEY_REPLY
+            and wire_type == WIRETYPE_LENGTH_DELIMITED
+        ):
+            reply = SubmitKeyReply()
+            for fn, wt, val in decode_fields(value):
+                if fn == 1 and wt == WIRETYPE_VARINT:
+                    reply.result = val
+            message.submit_key_reply = reply
+        # Other oneof fields are silently ignored
     return message
 
 
@@ -366,6 +426,33 @@ def decode_stream_message(data: bytes) -> StreamMessage:
 # High-level API
 # ---------------------------------------------------------------------------
 _DEFAULT_ADDRESS = b"\x00" * 6
+
+
+def build_start_key_exchange_message(
+    sender: bytes = _DEFAULT_ADDRESS,
+    recipient: bytes = _DEFAULT_ADDRESS,
+) -> bytes:
+    """Build a serialized StreamMessage containing a StartKeyExchangeRequest."""
+    msg = StreamMessage(
+        sender_address=sender,
+        recipient_address=recipient,
+        start_key_exchange_request=StartKeyExchangeRequest(),
+    )
+    return encode_stream_message(msg)
+
+
+def build_submit_key_message(
+    secret_key: bytes,
+    sender: bytes = _DEFAULT_ADDRESS,
+    recipient: bytes = _DEFAULT_ADDRESS,
+) -> bytes:
+    """Build a serialized StreamMessage containing a SubmitKeyRequest."""
+    msg = StreamMessage(
+        sender_address=sender,
+        recipient_address=recipient,
+        submit_key_request=SubmitKeyRequest(secret_key=secret_key),
+    )
+    return encode_stream_message(msg)
 
 
 def build_ping_message(

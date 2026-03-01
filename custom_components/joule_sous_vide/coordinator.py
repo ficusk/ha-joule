@@ -29,7 +29,9 @@ from .joule_proto import (
     build_live_feed_message,
     build_ping_message,
     build_start_cook_message,
+    build_start_key_exchange_message,
     build_stop_cook_message,
+    build_submit_key_message,
     decode_stream_message,
     parse_notification,
 )
@@ -61,6 +63,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._latest_data_point: CirculatorDataPoint | None = None
         self._notification_received: asyncio.Event = asyncio.Event()
         self._subscribed: bool = False
+        self._authenticated: bool = False
+        self._last_key_exchange_key: bytes | None = None
 
         super().__init__(
             hass,
@@ -78,22 +82,39 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         try:
             msg = decode_stream_message(bytes(data))
-            if msg.pong is not None:
+            if msg.start_key_exchange_reply is not None:
+                key = msg.start_key_exchange_reply.secret_key
+                _LOGGER.warning(
+                    "Got StartKeyExchangeReply! key=%s result=%d",
+                    key.hex(), msg.start_key_exchange_reply.result,
+                )
+                self._last_key_exchange_key = key
+                self._notification_received.set()
+            elif msg.submit_key_reply is not None:
+                _LOGGER.warning(
+                    "Got SubmitKeyReply! result=%d",
+                    msg.submit_key_reply.result,
+                )
+                self._authenticated = True
+                self._notification_received.set()
+            elif msg.pong is not None:
                 _LOGGER.warning("Got PONG from Joule!")
                 self._notification_received.set()
             elif msg.circulator_data_point is not None:
                 dp = msg.circulator_data_point
                 _LOGGER.warning(
-                    "Parsed CirculatorDataPoint: bath_temp=%.2f, step=%s",
+                    "CirculatorDataPoint: bath_temp=%.2f, step=%s",
                     dp.bath_temp, dp.program_step,
                 )
                 self._latest_data_point = dp
                 self._notification_received.set()
             else:
                 _LOGGER.warning(
-                    "Notification: handle=%d end=%s sender=%s — no Pong or DataPoint",
-                    msg.handle, msg.end, msg.sender_address.hex() if msg.sender_address else "none",
+                    "Notification: handle=%d end=%s sender=%s — unrecognized type",
+                    msg.handle, msg.end,
+                    msg.sender_address.hex() if msg.sender_address else "none",
                 )
+                self._notification_received.set()  # signal anyway
         except Exception:  # noqa: BLE001
             _LOGGER.warning("Failed to decode notification")
 
@@ -144,14 +165,15 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
 
-        Sequence: connect → subscribe → Ping handshake → BeginLiveFeed.
-        All messages now use handle=1 and end=True (previously 0/False).
+        Sequence: connect → subscribe → key exchange → BeginLiveFeed.
+        All messages use handle=1 and end=True.
         """
         try:
             reconnected = await self.api.ensure_connected()
             if reconnected:
                 _LOGGER.warning("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
+                self._authenticated = False
 
             if not self._subscribed:
                 _LOGGER.warning("Subscribing to notifications")
@@ -160,40 +182,52 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             sender = self.api.sender_address
             recipient = self.api.recipient_address
-            attempt_timeout = self.NOTIFICATION_TIMEOUT / 3
+            key_timeout = self.NOTIFICATION_TIMEOUT  # full timeout for key exchange
 
-            # Step 1: Ping handshake (required before operational commands)
-            ping_payload = build_ping_message(
-                sender=sender, recipient=recipient,
-            )
-            got_pong = await self._try_write_and_wait(
-                "Step 1: Ping → 4322",
-                ping_payload, attempt_timeout,
-                no_response=True,
-            )
-            if got_pong:
-                _LOGGER.warning("Ping/Pong handshake succeeded!")
+            # Step 1: BLE key exchange (required before device responds)
+            if not self._authenticated:
+                _LOGGER.warning("Starting BLE key exchange...")
+                key_exchange_payload = build_start_key_exchange_message(
+                    sender=sender, recipient=recipient,
+                )
+                got_reply = await self._try_write_and_wait(
+                    "Step 1: StartKeyExchangeRequest → 4322",
+                    key_exchange_payload, key_timeout,
+                    no_response=True,
+                )
 
-            # Step 2: BeginLiveFeed (send regardless of Pong result)
+                if got_reply and self._last_key_exchange_key:
+                    # Step 2: Submit the key back
+                    _LOGGER.warning(
+                        "Submitting key: %s",
+                        self._last_key_exchange_key.hex(),
+                    )
+                    submit_payload = build_submit_key_message(
+                        self._last_key_exchange_key,
+                        sender=sender, recipient=recipient,
+                    )
+                    self._notification_received.clear()
+                    await self._try_write_and_wait(
+                        "Step 2: SubmitKeyRequest → 4322",
+                        submit_payload, key_timeout,
+                        no_response=True,
+                    )
+                elif not got_reply:
+                    _LOGGER.warning("No reply to key exchange")
+
+            # Step 3: BeginLiveFeed
+            self._notification_received.clear()
             live_feed_payload = build_live_feed_message(
                 sender=sender, recipient=recipient,
             )
-            self._notification_received.clear()
-            got_data = await self._try_write_and_wait(
-                "Step 2: BeginLiveFeed → 4322",
-                live_feed_payload, attempt_timeout,
+            await self._try_write_and_wait(
+                "Step 3: BeginLiveFeed → 4322",
+                live_feed_payload, key_timeout,
                 no_response=True,
             )
 
             if not self._notification_received.is_set():
-                # Step 3: Try BeginLiveFeed with response=True
-                got_data = await self._try_write_and_wait(
-                    "Step 3: BeginLiveFeed → 4322 (with-response)",
-                    live_feed_payload, attempt_timeout,
-                )
-
-            if not self._notification_received.is_set():
-                _LOGGER.warning("All steps failed — no notification received")
+                _LOGGER.warning("No data received from Joule")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
