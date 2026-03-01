@@ -45,6 +45,7 @@ def mock_ble_api():
         instance.read_characteristic = AsyncMock(return_value=None)
         instance.sender_address = bytes.fromhex("aabbaabbaabbaabb")
         instance.recipient_address = bytes.fromhex("a0a3a8e5addc0102")
+        instance.mtu_size = 23
         mock_cls.return_value = instance
         yield instance
 

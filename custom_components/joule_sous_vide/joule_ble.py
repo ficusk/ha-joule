@@ -123,6 +123,12 @@ class JouleBLEAPI:
                 BleakClient, ble_device, self.mac_address
             )
             self._client = client
+
+            # Request MTU exchange — the Nordic nRF SoftDevice may need a
+            # larger MTU before it forwards writes to the application layer.
+            # Default MTU is 23 (20-byte payload) which is too small for
+            # full StreamMessage (30 bytes).
+            await self._request_mtu(client)
             _LOGGER.warning(
                 "Connected to Joule at %s (MTU=%d)",
                 self.mac_address,
@@ -138,6 +144,78 @@ class JouleBLEAPI:
             raise JouleBLEError(
                 f"BLE backend error for {self.mac_address}: {err}"
             ) from err
+
+    @property
+    def mtu_size(self) -> int:
+        """Return the current negotiated MTU (0 if not connected)."""
+        if self._client is None:
+            return 0
+        try:
+            return self._client.mtu_size
+        except Exception:  # noqa: BLE001
+            return 0
+
+    async def _request_mtu(self, client: BleakClient) -> None:
+        """Try to negotiate a larger MTU with the device.
+
+        On BlueZ, AcquireWrite/AcquireNotify trigger MTU exchange.
+        We also try the internal _acquire_mtu() if available.
+        """
+        try:
+            # Try bleak's internal MTU acquisition (BlueZ-specific)
+            backend = getattr(client, "_backend", None)
+            if backend and hasattr(backend, "_acquire_mtu"):
+                await backend._acquire_mtu()
+                _LOGGER.warning(
+                    "MTU after _acquire_mtu: %d", client.mtu_size,
+                )
+                return
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("_acquire_mtu failed: %s", err)
+
+        # Fallback: try to exchange MTU via D-Bus
+        try:
+            from dbus_fast.aio import MessageBus
+            from dbus_fast import BusType, Message, MessageType
+
+            dbus_path = (
+                f"/org/bluez/hci0/dev_{self.mac_address.replace(':', '_')}"
+            )
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            try:
+                # Request ATT MTU exchange by writing a tiny value to any
+                # writable char — this triggers BlueZ to negotiate MTU.
+                # We use the GATT characteristic AcquireWrite method.
+                for service in client.services:
+                    for char in service.characteristics:
+                        if "write" in char.properties:
+                            char_path = f"{dbus_path}/service000a/char{char.handle:04x}"
+                            try:
+                                reply = await bus.call(
+                                    Message(
+                                        destination="org.bluez",
+                                        path=char.path,
+                                        interface="org.bluez.GattCharacteristic1",
+                                        member="AcquireWrite",
+                                        signature="a{sv}",
+                                        body=[{}],
+                                    )
+                                )
+                                if reply.message_type == MessageType.METHOD_RETURN:
+                                    fd, mtu = reply.body
+                                    _LOGGER.warning(
+                                        "AcquireWrite MTU: %d", mtu,
+                                    )
+                                    fd.close()
+                                    return
+                            except Exception:  # noqa: BLE001
+                                pass
+                            break
+                    break
+            finally:
+                bus.disconnect()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("D-Bus MTU exchange failed: %s", err)
 
     async def verify_and_enable_notifications(self) -> bool:
         """Verify CCCD on 4325 is 0x0001, manually write if needed.

@@ -26,7 +26,6 @@ from .joule_proto import (
     CirculatorDataPoint,
     ProgramStep,
     build_live_feed_message,
-    build_ping_message,
     build_start_cook_message,
     build_start_key_exchange_message,
     build_stop_cook_message,
@@ -168,6 +167,23 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             options={**self._entry.options, CONF_BLE_AUTH_KEY: key.hex()},
         )
 
+    async def _safe_write(
+        self, label: str, payload: bytes, *, response: bool = True,
+    ) -> bool:
+        """Write a payload to 4322 with error handling. Returns True on success."""
+        self._notification_received.clear()
+        try:
+            async with asyncio.timeout(5):
+                if response:
+                    await self.api.write_message(payload)
+                else:
+                    await self.api.write_message_no_response(payload)
+            _LOGGER.warning("Write OK: %s (resp=%s)", label, response)
+            return True
+        except (TimeoutError, JouleBLEError) as err:
+            _LOGGER.warning("Write FAIL: %s: %s", label, err)
+            return False
+
     async def _try_write_and_wait(
         self, label: str, payload: bytes, timeout: float,
         *, no_response: bool = False,
@@ -253,34 +269,29 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The Joule uses its own key exchange (NOT OS-level BLE pairing).
         The user must press the button on top of the Joule within 60 seconds.
 
-        Sends a Ping first to verify the BLE write path is functional, then
-        tries key exchange with multiple address variants.  Each variant is
-        written three ways: response=True to 4322, response=False to 4322,
-        and response=False to 4326.
+        v0.9.8 revealed MTU=23 (20-byte payload).  The Android app always
+        sends full StreamMessage (handle+end+sender+recipient+command = 30
+        bytes) in a single packet because Android auto-negotiates larger MTU.
+        At MTU=23, 30 bytes requires Long Write (fragmentation) which the
+        Nordic nRF SoftDevice may not forward to the application layer.
+
+        This version builds "compact" full-format messages (handle+end+command,
+        no addresses) that fit in 20 bytes, AND sends 30-byte full-format
+        messages with response=True (which triggers Long Write via BlueZ).
         """
         from homeassistant.components.persistent_notification import (
             async_create,
             async_dismiss,
         )
-        from .joule_ble import mac_to_bytes
         from .joule_proto import (
             encode_field_bytes,
+            encode_field_fixed32,
+            encode_field_varint,
             FIELD_START_KEY_EXCHANGE_REQUEST,
         )
 
-        mac_bytes = mac_to_bytes(self.api.mac_address)  # 6 bytes MSB
-
-        # Address candidates: most likely constructions from MAC
-        address_candidates: list[tuple[str, bytes]] = [
-            ("MAC+0000", mac_bytes + b"\x00\x00"),
-            ("no-addr", b""),
-        ]
-
-        # If manufacturer data provided a real address, try it first
-        mfr_addr = self.api.recipient_address
-        is_padded_mac = mfr_addr == mac_bytes + b"\x00\x00"
-        if not is_padded_mac and len(mfr_addr) == 8:
-            address_candidates.insert(0, ("mfr-data", mfr_addr))
+        mtu_payload = self.api.mtu_size - 3 if self.api.mtu_size > 3 else 20
+        _LOGGER.warning("Effective ATT payload: %d bytes", mtu_payload)
 
         async_create(
             self.hass,
@@ -291,95 +302,86 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         try:
-            # Step 0: Send a Ping to test the write path
-            ping_payload = build_ping_message(
+            # --- Compact full-format messages (fit in 20-byte MTU) ---
+            # handle(1)=5B + end(true)=2B + command=3B = 10 bytes
+            compact_ke = (
+                encode_field_fixed32(1, 1)          # handle = 1
+                + encode_field_varint(4, 1)          # end = true
+                + encode_field_bytes(FIELD_START_KEY_EXCHANGE_REQUEST, b"")
+            )
+            _LOGGER.warning(
+                "COMPACT key exchange (%d bytes): %s",
+                len(compact_ke), compact_ke.hex(),
+            )
+            # Write compact to 4322 with response=True
+            await self._safe_write(
+                "compact-WR", compact_ke, response=True,
+            )
+            # Write compact to 4322 with response=False
+            await self._safe_write(
+                "compact-WC", compact_ke, response=False,
+            )
+
+            # --- Compact with empty sender (matches app structure) ---
+            # handle(1)+end(true)+sender(empty)+command = 12 bytes
+            compact_sender = (
+                encode_field_fixed32(1, 1)
+                + encode_field_varint(4, 1)
+                + encode_field_bytes(5, b"")  # sender = empty
+                + encode_field_bytes(FIELD_START_KEY_EXCHANGE_REQUEST, b"")
+            )
+            _LOGGER.warning(
+                "COMPACT+sender (%d bytes): %s",
+                len(compact_sender), compact_sender.hex(),
+            )
+            await self._safe_write(
+                "compact+sender-WR", compact_sender, response=True,
+            )
+
+            # --- SDK-minimal (no handle/end, just command) ---
+            bare_ke = encode_field_bytes(FIELD_START_KEY_EXCHANGE_REQUEST, b"")
+            _LOGGER.warning(
+                "BARE key exchange (%d bytes): %s",
+                len(bare_ke), bare_ke.hex(),
+            )
+            await self._safe_write("bare-WR", bare_ke, response=True)
+
+            # --- Full format with addresses (30 bytes) ---
+            # Only works if MTU >= 33 or via Long Write (response=True)
+            full_payload = build_start_key_exchange_message(
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
             )
             _LOGGER.warning(
-                "PING (%d bytes): %s", len(ping_payload), ping_payload.hex(),
+                "FULL key exchange (%d bytes, MTU payload=%d): %s",
+                len(full_payload), mtu_payload, full_payload.hex(),
             )
-            try:
-                async with asyncio.timeout(5):
-                    await self.api.write_message_no_response(ping_payload)
-                _LOGGER.warning("Ping write OK (response=False)")
-            except (TimeoutError, JouleBLEError) as err:
-                _LOGGER.warning("Ping write FAIL: %s", err)
-
-            # Step 1: Send key exchange with each address variant
-            # Each variant is written three ways to maximize coverage:
-            # a) 4322 response=True  (ATT Write Request)
-            # b) 4322 response=False (ATT Write Command)
-            # c) 4326 response=False (write-without-response char)
-            _LOGGER.warning(
-                "Starting key exchange — %d address variants × 3 write modes",
-                len(address_candidates),
-            )
-            for label, addr in address_candidates:
-                sdk_payload = b""
-                if addr:
-                    sdk_payload += encode_field_bytes(6, addr)
-                sdk_payload += encode_field_bytes(
-                    FIELD_START_KEY_EXCHANGE_REQUEST, b""
+            if len(full_payload) <= mtu_payload:
+                # Fits in single ATT packet
+                await self._safe_write(
+                    "full-single", full_payload, response=True,
+                )
+            else:
+                # Requires Long Write — try response=True (BlueZ handles it)
+                await self._safe_write(
+                    "full-longwrite", full_payload, response=True,
                 )
                 _LOGGER.warning(
-                    "KEY EXCHANGE %s (%d bytes): %s",
-                    label, len(sdk_payload), sdk_payload.hex(),
+                    "NOTE: %d-byte message sent via Long Write (fragmented) — "
+                    "device may not handle fragmented writes correctly",
+                    len(full_payload),
                 )
-                self._notification_received.clear()
-                # a) Write to 4322 response=True
-                try:
-                    async with asyncio.timeout(5):
-                        await self.api.write_message(sdk_payload)
-                    _LOGGER.warning("4322-WR OK: %s", label)
-                except (TimeoutError, JouleBLEError) as err:
-                    _LOGGER.warning("4322-WR FAIL %s: %s", label, err)
-                # b) Write to 4322 response=False
-                try:
-                    async with asyncio.timeout(5):
-                        await self.api.write_message_no_response(sdk_payload)
-                    _LOGGER.warning("4322-WC OK: %s", label)
-                except (TimeoutError, JouleBLEError) as err:
-                    _LOGGER.warning("4322-WC FAIL %s: %s", label, err)
-                # c) Write to 4326 response=False
-                try:
-                    async with asyncio.timeout(5):
-                        await self.api.write_to_file_char(sdk_payload)
-                    _LOGGER.warning("4326-WC OK: %s", label)
-                except (TimeoutError, JouleBLEError) as err:
-                    _LOGGER.warning("4326-WC FAIL %s: %s", label, err)
 
-            # Step 2: Full-format message (with handle/end/sender)
-            full_payload = build_start_key_exchange_message(
-                sender=self.api.sender_address,
-                recipient=mac_bytes + b"\x00\x00",
-            )
-            _LOGGER.warning(
-                "KEY EXCHANGE full-fmt (%d bytes): %s",
-                len(full_payload), full_payload.hex(),
-            )
-            self._notification_received.clear()
-            try:
-                async with asyncio.timeout(5):
-                    await self.api.write_message_no_response(full_payload)
-                _LOGGER.warning("Write OK: full-fmt (response=False)")
-            except (TimeoutError, JouleBLEError) as err:
-                _LOGGER.warning("Write FAIL full-fmt: %s", err)
-
-            # Step 3: Wait for any response
+            # --- Wait for any response ---
             _LOGGER.warning(
                 "All variants sent — waiting %.0fs for response "
                 "(PRESS JOULE BUTTON NOW!)",
                 self.KEY_EXCHANGE_TIMEOUT,
             )
-            best_payload = encode_field_bytes(
-                FIELD_START_KEY_EXCHANGE_REQUEST, b""
-            )
             got_reply = await self._try_write_and_wait(
                 "KeyExchange-wait",
-                best_payload,
+                compact_ke,
                 self.KEY_EXCHANGE_TIMEOUT,
-                no_response=True,
             )
 
             if got_reply and self._auth_key is not None:
@@ -387,7 +389,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return await self._submit_key(self._auth_key)
 
             _LOGGER.warning(
-                "Key exchange timed out — no address variant got a response"
+                "Key exchange timed out — no variant got a response"
             )
             return False
 
@@ -451,6 +453,12 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Verify CCCD was actually written
                 cccd_ok = await self.api.verify_and_enable_notifications()
                 _LOGGER.warning("CCCD verification: %s", "OK" if cccd_ok else "FAILED")
+
+                # Log MTU after subscribe — start_notify may have triggered
+                # MTU exchange via AcquireNotify
+                _LOGGER.warning(
+                    "MTU after subscribe: %d", self.api.mtu_size,
+                )
 
                 # Read 4323 to clear any stale buffer — the official app
                 # always reads 4323 on notification; if the device waits for
