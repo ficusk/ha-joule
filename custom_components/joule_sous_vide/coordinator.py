@@ -174,12 +174,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Write a payload to 4322 (write-with-response) and wait for data.
 
         The 4322 characteristic has the [write] property (Write Request only).
-        The official app uses Write Request (response=True) on this char.
-        The write itself has a 10s timeout to avoid blocking forever if the
-        device doesn't send a GATT Write Response.
-
-        After the write, we wait for a notification on 4325 (which triggers
-        a read from 4323).  Returns True if a response arrived.
+        The write has a 10s timeout to avoid blocking if device doesn't ACK.
+        After the write, waits for a notification on 4325 (triggers a read
+        from 4323).  During the wait, reads 4323 every 5 seconds to keep the
+        BLE connection alive and to catch responses.  Returns True on response.
         """
         _LOGGER.warning(
             "%s (%d bytes): %s", label, len(payload), payload.hex(),
@@ -187,57 +185,54 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._notification_received.clear()
 
         # Write with response=True (matches 4322's [write] property).
-        # Timeout the write itself to avoid hanging if device doesn't ACK.
-        write_ok = False
         try:
             async with asyncio.timeout(10):
                 await self.api.write_message(payload)
-            _LOGGER.warning("Write-with-response succeeded for %s", label)
-            write_ok = True
+            _LOGGER.warning("Write succeeded for %s", label)
         except TimeoutError:
-            _LOGGER.warning(
-                "Write-with-response timed out for %s — "
-                "device may require encryption", label,
-            )
+            _LOGGER.warning("Write timed out for %s", label)
+            return False
         except JouleBLEError as err:
-            _LOGGER.warning(
-                "Write-with-response failed for %s: %s", label, err,
-            )
-
-        if not write_ok:
+            _LOGGER.warning("Write failed for %s: %s", label, err)
             return False
 
-        # Wait for notification-triggered-read to process the response
-        try:
-            async with asyncio.timeout(timeout):
-                await self._notification_received.wait()
-            _LOGGER.warning("Got response after %s!", label)
-            return True
-        except TimeoutError:
-            pass
-
-        # Fallback: poll 4323 directly (device may skip notification)
-        read_data = await self.api.read_characteristic(READ_CHAR_UUID)
-        if read_data and len(read_data) > 0:
-            _LOGGER.warning(
-                "Fallback READ after %s: %d bytes: %s",
-                label, len(read_data), read_data.hex(),
-            )
-            self._try_decode_message(read_data, source=f"4323-fallback-{label}")
-            if self._notification_received.is_set():
+        # Poll: wait for notification OR check 4323 every 5 seconds
+        elapsed = 0.0
+        poll_interval = 5.0
+        while elapsed < timeout:
+            wait_time = min(poll_interval, timeout - elapsed)
+            try:
+                async with asyncio.timeout(wait_time):
+                    await self._notification_received.wait()
+                _LOGGER.warning("Got response after %s!", label)
                 return True
+            except TimeoutError:
+                elapsed += wait_time
 
-        _LOGGER.warning("No response to %s", label)
+            # Keep connection alive + check for data on 4323
+            read_data = await self.api.read_characteristic(READ_CHAR_UUID)
+            if read_data and len(read_data) > 0:
+                _LOGGER.warning(
+                    "Poll READ after %s: %d bytes: %s",
+                    label, len(read_data), read_data.hex(),
+                )
+                self._try_decode_message(read_data, source=f"4323-poll-{label}")
+                if self._notification_received.is_set():
+                    return True
+            else:
+                _LOGGER.warning(
+                    "Poll READ after %s at %.0fs: empty", label, elapsed,
+                )
+
+        _LOGGER.warning("No response to %s after %.0fs", label, timeout)
         return False
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Poll the device for the current temperature.
 
-        Sequence: connect → subscribe → read 4323 → authenticate → BeginLiveFeed.
-
-        Authentication uses a persisted BLE auth key from a previous pairing.
-        If no key is stored, a first-time key exchange is attempted (requires
-        the user to press the button on the Joule within 60 seconds).
+        Tries multiple message framing variants to find which one the device
+        responds to.  The Joule's firmware may expect different StreamMessage
+        defaults than what the base.proto suggests.
         """
         try:
             reconnected = await self.api.ensure_connected()
@@ -251,7 +246,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
 
-                # The official app reads 4323 immediately after subscribing
+                # Read 4323 and 4324 after subscribe (diagnostics)
                 _LOGGER.warning("Initial read of 4323 after subscribe")
                 init_data = await self.api.read_characteristic(READ_CHAR_UUID)
                 if init_data and len(init_data) > 0:
@@ -261,85 +256,76 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     self._try_decode_message(init_data, source="4323-initial")
                 else:
-                    _LOGGER.warning("Initial 4323 read: empty (expected)")
+                    _LOGGER.warning("Initial 4323 read: empty")
 
-            sender = self.api.sender_address
+                # Read the unknown 4324 characteristic
+                char_4324 = "700b4324-9836-4383-a2b2-31a9098d1473"
+                data_4324 = await self.api.read_characteristic(char_4324)
+                if data_4324 and len(data_4324) > 0:
+                    _LOGGER.warning(
+                        "4324 data: %d bytes: %s",
+                        len(data_4324), data_4324.hex(),
+                    )
+                else:
+                    _LOGGER.warning("4324 read: empty")
+
             recipient = self.api.recipient_address
 
-            # --- Authentication ---
-            if not self._authenticated:
-                if self._auth_key:
-                    # We have a stored key from previous pairing → SubmitKey
-                    _LOGGER.warning(
-                        "Authenticating with stored key: %s",
-                        self._auth_key.hex(),
-                    )
-                    submit_payload = build_submit_key_message(
-                        self._auth_key,
-                        sender=sender, recipient=recipient,
-                    )
-                    got_auth = await self._try_write_and_wait(
-                        "SubmitKeyRequest (stored key)",
-                        submit_payload, self.NOTIFICATION_TIMEOUT,
-                    )
-                    if got_auth and self._authenticated:
-                        _LOGGER.warning("Authenticated with stored key!")
-                    else:
-                        _LOGGER.warning(
-                            "Stored key rejected — will try fresh key exchange"
-                        )
-                        self._auth_key = None
+            # --- Try multiple framing variants ---
+            # The SDK only sets recipientAddress + oneof field.
+            # Proto2 defaults: handle=0, end=false, senderAddress=empty.
+            from .joule_proto import StreamMessage, BeginLiveFeedRequest, \
+                StartKeyExchangeRequest, Ping, encode_stream_message
 
-                if not self._authenticated and not self._auth_key:
-                    # First-time pairing: StartKeyExchange → user presses button
-                    _LOGGER.warning(
-                        "*** PRESS THE BUTTON ON YOUR JOULE TO PAIR ***"
-                    )
-                    _LOGGER.warning(
-                        "Sending StartKeyExchangeRequest — "
-                        "waiting up to 60s for button press..."
-                    )
-                    key_payload = build_start_key_exchange_message(
-                        sender=sender, recipient=recipient,
-                    )
-                    got_key = await self._try_write_and_wait(
-                        "StartKeyExchangeRequest",
-                        key_payload, self.KEY_EXCHANGE_TIMEOUT,
-                    )
+            attempts = [
+                (
+                    "A: BeginLiveFeed (minimal — no sender, handle=0, end=false)",
+                    StreamMessage(
+                        handle=0, end=False,
+                        recipient_address=recipient,
+                        begin_live_feed_request=BeginLiveFeedRequest(),
+                    ),
+                ),
+                (
+                    "B: Ping (minimal — no sender, handle=0, end=false)",
+                    StreamMessage(
+                        handle=0, end=False,
+                        recipient_address=recipient,
+                        ping=Ping(),
+                    ),
+                ),
+                (
+                    "C: StartKeyExchange (minimal — no sender, handle=0, end=false)",
+                    StreamMessage(
+                        handle=0, end=False,
+                        recipient_address=recipient,
+                        start_key_exchange_request=StartKeyExchangeRequest(),
+                    ),
+                ),
+                (
+                    "D: BeginLiveFeed (handle=1, end=true, with sender)",
+                    StreamMessage(
+                        handle=1, end=True,
+                        sender_address=self.api.sender_address,
+                        recipient_address=recipient,
+                        begin_live_feed_request=BeginLiveFeedRequest(),
+                    ),
+                ),
+            ]
 
-                    if got_key and self._auth_key:
-                        _LOGGER.warning(
-                            "Key exchange succeeded! key=%s — submitting...",
-                            self._auth_key.hex(),
-                        )
-                        submit_payload = build_submit_key_message(
-                            self._auth_key,
-                            sender=sender, recipient=recipient,
-                        )
-                        await self._try_write_and_wait(
-                            "SubmitKeyRequest (new key)",
-                            submit_payload, self.NOTIFICATION_TIMEOUT,
-                        )
-                    elif not got_key:
-                        _LOGGER.warning(
-                            "No key exchange reply — "
-                            "is the Joule nearby? Did you press the button?"
-                        )
+            for label, msg in attempts:
+                if self._notification_received.is_set():
+                    break
+                payload = encode_stream_message(msg)
+                got_reply = await self._try_write_and_wait(
+                    label, payload, self.NOTIFICATION_TIMEOUT,
+                )
+                if got_reply:
+                    _LOGGER.warning("SUCCESS with %s", label)
+                    break
 
-            # --- Live feed ---
-            if self._authenticated:
-                self._notification_received.clear()
-                live_feed_payload = build_live_feed_message(
-                    sender=sender, recipient=recipient,
-                )
-                await self._try_write_and_wait(
-                    "BeginLiveFeedRequest",
-                    live_feed_payload, self.NOTIFICATION_TIMEOUT,
-                )
-            else:
-                _LOGGER.warning(
-                    "Skipping BeginLiveFeed — not authenticated yet"
-                )
+            if not self._notification_received.is_set():
+                _LOGGER.warning("No response from any message variant")
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
