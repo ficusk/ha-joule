@@ -60,7 +60,6 @@ def _fast_notification_timeout(monkeypatch: pytest.MonkeyPatch):
     """
     monkeypatch.setattr(JouleCoordinator, "NOTIFICATION_TIMEOUT", 0.01)
     monkeypatch.setattr(JouleCoordinator, "KEY_EXCHANGE_TIMEOUT", 0.01)
-    monkeypatch.setattr(JouleCoordinator, "DIAG_SLEEP", 0.0)
 
 
 @pytest.fixture(autouse=True)

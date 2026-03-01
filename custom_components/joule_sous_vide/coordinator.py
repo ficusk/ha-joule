@@ -53,7 +53,6 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     NOTIFICATION_TIMEOUT: float = 10.0  # seconds; overridden in tests
     KEY_EXCHANGE_TIMEOUT: float = 60.0  # seconds; user must press button
-    DIAG_SLEEP: float = 2.0  # diagnostic sleep between reads; patched in tests
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._entry = entry
@@ -246,16 +245,88 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning("%s: empty", label)
         return data
 
-    async def _async_update_data(self) -> dict[str, Any]:
-        """Diagnostic v0.8.10: Try different chars, formats, and sequences.
+    async def _key_exchange(self) -> bool:
+        """Perform application-level key exchange with the Joule.
 
-        Pairing confirmed non-functional (Joule rejects it).  This version
-        tries every remaining theory:
-        1. Write to 4322 BEFORE subscribing to 4325
-        2. Write to 4326 (write-without-response) instead of 4322
-        3. Try end=True + sender + handle=1 (full StreamMessage)
-        4. Try IdentifyCirculatorRequest (the "hello" message)
-        5. Try raw protobuf without StreamMessage envelope
+        The Joule uses its own key exchange (NOT OS-level BLE pairing).
+        The user must press the button on top of the Joule within 60 seconds.
+        Returns True if authentication succeeded.
+        """
+        from homeassistant.components.persistent_notification import (
+            async_create,
+            async_dismiss,
+        )
+
+        _LOGGER.warning("Starting key exchange — user must press Joule button")
+        async_create(
+            self.hass,
+            "**Press the button on top of your Joule** to complete pairing.\n\n"
+            "You have 60 seconds.",
+            title="Joule Pairing Required",
+            notification_id="joule_sous_vide_pairing",
+        )
+
+        try:
+            payload = build_start_key_exchange_message(
+                sender=self.api.sender_address,
+                recipient=self.api.recipient_address,
+            )
+            got_reply = await self._try_write_and_wait(
+                "StartKeyExchangeRequest", payload, self.KEY_EXCHANGE_TIMEOUT,
+            )
+
+            if not got_reply or self._auth_key is None:
+                _LOGGER.warning(
+                    "Key exchange timed out — no button press detected"
+                )
+                return False
+
+            _LOGGER.warning("Got secret key! Submitting back to device...")
+            return await self._submit_key(self._auth_key)
+
+        finally:
+            async_dismiss(self.hass, "joule_sous_vide_pairing")
+
+    async def _submit_key(self, key: bytes) -> bool:
+        """Submit a secret key to authenticate with the Joule.
+
+        Returns True if the device accepted the key.
+        """
+        _LOGGER.warning("Submitting auth key: %s", key.hex())
+        payload = build_submit_key_message(
+            secret_key=key,
+            sender=self.api.sender_address,
+            recipient=self.api.recipient_address,
+        )
+        got_reply = await self._try_write_and_wait(
+            "SubmitKeyRequest", payload, self.NOTIFICATION_TIMEOUT,
+        )
+
+        if got_reply and self._authenticated:
+            _LOGGER.warning("Authentication successful!")
+            return True
+
+        _LOGGER.warning("SubmitKeyRequest failed or rejected")
+        return False
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Poll the Joule for current state.
+
+        Authentication flow (first connection, no stored key):
+          1. Subscribe to notifications on 4325
+          2. Send StartKeyExchangeRequest — user presses Joule button
+          3. Receive StartKeyExchangeReply with secret key
+          4. Send SubmitKeyRequest with the key
+          5. Receive SubmitKeyReply — now authorized
+
+        Reconnection with stored key:
+          1. Subscribe to notifications on 4325
+          2. Send SubmitKeyRequest with stored key
+          3. Receive SubmitKeyReply — now authorized
+
+        After authentication:
+          - Send BeginLiveFeed to request streaming data
+          - Joule responds with CirculatorDataPoint via notifications
         """
         try:
             reconnected = await self.api.ensure_connected()
@@ -264,140 +335,44 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._subscribed = False
                 self._authenticated = False
 
-            from .joule_proto import (
-                StreamMessage, Ping, BeginLiveFeedRequest,
-                IdentifyCirculatorRequest, encode_stream_message,
-                encode_field_bytes, FIELD_PING,
-            )
-            from .const import FILE_CHAR_UUID as F4326
-
-            recipient = self.api.recipient_address
-            sender = self.api.sender_address
-
-            # === STEP 1: Write BEFORE subscribing ===
-            _LOGGER.warning("=== STEP 1: Write Ping BEFORE subscribe ===")
-            ping_full = encode_stream_message(StreamMessage(
-                handle=1, end=True,
-                sender_address=sender,
-                recipient_address=recipient,
-                ping=Ping(),
-            ))
-            _LOGGER.warning(
-                "WRITE Ping (full) → 4322 (%d bytes): %s",
-                len(ping_full), ping_full.hex(),
-            )
-            await self.api.write_message(ping_full)
-            _LOGGER.warning("Write Ping (pre-subscribe) succeeded")
-
-            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 pre-sub")
-            await self._read_and_log(READ_CHAR_UUID, "4323 pre-sub")
-
-            # === STEP 2: Now subscribe ===
-            _LOGGER.warning("=== STEP 2: Subscribe ===")
+            # Step 1: Subscribe to notifications on 4325
             if not self._subscribed:
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
+                _LOGGER.warning("Subscribed to 4325 notifications")
 
-            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 post-sub")
-            await self._read_and_log(READ_CHAR_UUID, "4323 post-sub")
+            # Step 2: Authenticate if needed
+            if not self._authenticated:
+                if self._auth_key is not None:
+                    _LOGGER.warning("Have stored auth key — submitting")
+                    authenticated = await self._submit_key(self._auth_key)
+                    if not authenticated:
+                        _LOGGER.warning(
+                            "Stored key rejected — starting fresh key exchange"
+                        )
+                        self._auth_key = None
+                        authenticated = await self._key_exchange()
+                else:
+                    _LOGGER.warning(
+                        "No auth key — starting key exchange "
+                        "(press Joule button!)"
+                    )
+                    authenticated = await self._key_exchange()
 
-            # === STEP 3: Write to 4326 (write-without-response char) ===
-            _LOGGER.warning("=== STEP 3: Write Ping to 4326 ===")
-            _LOGGER.warning(
-                "WRITE Ping → 4326 (%d bytes): %s",
-                len(ping_full), ping_full.hex(),
-            )
-            try:
-                await self.api.write_to_file_char(ping_full)
-                _LOGGER.warning("Write Ping to 4326 succeeded")
-            except JouleBLEError as err:
-                _LOGGER.warning("Write Ping to 4326 failed: %s", err)
+                if not authenticated:
+                    _LOGGER.warning(
+                        "Authentication failed — will retry next poll"
+                    )
 
-            await asyncio.sleep(self.DIAG_SLEEP)
-            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 after 4326")
-            await self._read_and_log(READ_CHAR_UUID, "4323 after 4326")
-
-            # === STEP 4: IdentifyCirculatorRequest (the "hello") ===
-            _LOGGER.warning("=== STEP 4: IdentifyCirculatorRequest ===")
-            identify = encode_stream_message(StreamMessage(
-                handle=1, end=True,
-                sender_address=sender,
-                recipient_address=recipient,
-                identify_circulator_request=IdentifyCirculatorRequest(),
-            ))
-            _LOGGER.warning(
-                "WRITE IdentifyCirculator → 4322 (%d bytes): %s",
-                len(identify), identify.hex(),
-            )
-            await self.api.write_message(identify)
-            _LOGGER.warning("Write IdentifyCirculator succeeded")
-
-            await asyncio.sleep(self.DIAG_SLEEP)
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 after Identify",
-            )
-            await self._read_and_log(READ_CHAR_UUID, "4323 after Identify")
-
-            # Also try IdentifyCirculator to 4326
-            _LOGGER.warning("WRITE IdentifyCirculator → 4326")
-            try:
-                await self.api.write_to_file_char(identify)
-                _LOGGER.warning("Write IdentifyCirculator to 4326 succeeded")
-            except JouleBLEError as err:
-                _LOGGER.warning("IdentifyCirculator to 4326 failed: %s", err)
-
-            await asyncio.sleep(self.DIAG_SLEEP)
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 after Identify-4326",
-            )
-            await self._read_and_log(
-                READ_CHAR_UUID, "4323 after Identify-4326",
-            )
-
-            # === STEP 5: Minimal Ping — no envelope ===
-            _LOGGER.warning("=== STEP 5: Raw Ping (no envelope) ===")
-            # Just the Ping field tag + empty length: field 18, LEN, 0 bytes
-            raw_ping = encode_field_bytes(FIELD_PING, b"")
-            _LOGGER.warning(
-                "WRITE raw Ping → 4322 (%d bytes): %s",
-                len(raw_ping), raw_ping.hex(),
-            )
-            await self.api.write_message(raw_ping)
-            _LOGGER.warning("Write raw Ping succeeded")
-
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 after raw Ping",
-            )
-            await self._read_and_log(
-                READ_CHAR_UUID, "4323 after raw Ping",
-            )
-
-            # === STEP 6: Ping with minimal envelope (handle=0 only) ===
-            _LOGGER.warning("=== STEP 6: Ping minimal envelope ===")
-            ping_min = encode_stream_message(StreamMessage(
-                handle=0, end=False,
-                recipient_address=recipient,
-                ping=Ping(),
-            ))
-            _LOGGER.warning(
-                "WRITE Ping (minimal) → 4322 (%d bytes): %s",
-                len(ping_min), ping_min.hex(),
-            )
-            await self.api.write_message(ping_min)
-            _LOGGER.warning("Write Ping (minimal) succeeded")
-
-            await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 after min Ping",
-            )
-            await self._read_and_log(
-                READ_CHAR_UUID, "4323 after min Ping",
-            )
-
-            # === Summary ===
-            if self._notification_received.is_set():
-                _LOGGER.warning("SUCCESS: notification was received!")
-            else:
-                _LOGGER.warning("No notification received in any variant.")
+            # Step 3: Request live data feed
+            if self._authenticated:
+                payload = build_live_feed_message(
+                    sender=self.api.sender_address,
+                    recipient=self.api.recipient_address,
+                )
+                await self._try_write_and_wait(
+                    "BeginLiveFeed", payload, self.NOTIFICATION_TIMEOUT,
+                )
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
