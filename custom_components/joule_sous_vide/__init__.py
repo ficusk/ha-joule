@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
@@ -31,30 +32,47 @@ def _copy_card_to_www(hass: HomeAssistant) -> None:
         shutil.copy2(str(LOVELACE_CARD_PATH), str(dest))
 
 
+def _get_lovelace_resources(hass: HomeAssistant) -> Any:
+    """Get the Lovelace resources collection, supporting old and new HA APIs."""
+    # New API (HA 2025.x+): hass.data[LOVELACE_DATA].resources
+    try:
+        from homeassistant.components.lovelace.const import LOVELACE_DATA  # type: ignore[attr-defined]
+
+        lovelace_data = hass.data.get(LOVELACE_DATA)
+        if lovelace_data is not None:
+            resources = getattr(lovelace_data, "resources", None)
+            if resources is not None:
+                return resources
+    except ImportError:
+        pass
+
+    # Old API (HA 2024.x): hass.data["lovelace"]["resources"]
+    try:
+        resources = hass.data["lovelace"]["resources"]
+        if resources is not None:
+            return resources
+    except (KeyError, TypeError):
+        pass
+
+    return None
+
+
 async def _register_lovelace_resource(hass: HomeAssistant) -> bool:
     """Add the card JS as a Lovelace resource if not already present.
 
     Returns True if the resource is registered (or was already present).
     """
-    try:
-        resources = hass.data["lovelace"]["resources"]
-        if resources is None:
-            _LOGGER.warning(
-                "Lovelace resources collection is None — "
-                "Lovelace may be in YAML mode"
-            )
-            return False
-    except (KeyError, TypeError):
+    resources = _get_lovelace_resources(hass)
+    if resources is None:
         _LOGGER.warning(
-            "Lovelace resources not available in hass.data — "
-            "lovelace component may not be loaded yet"
+            "Lovelace resources not available — "
+            "lovelace component may not be loaded yet or is in YAML mode"
         )
         return False
 
     try:
         if not resources.loaded:
             await resources.async_load()
-            resources.loaded = True
 
         for item in resources.async_items():
             if item.get("url") == LOVELACE_LOCAL_URL:

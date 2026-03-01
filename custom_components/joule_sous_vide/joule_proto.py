@@ -286,8 +286,10 @@ def encode_circulator_program(program: CirculatorProgram) -> bytes:
     result = encode_field_float(1, program.set_point)
     if program.cook_time > 0:
         result += encode_field_varint(2, program.cook_time)
-    if program.program_type != ProgramType.MANUAL:
-        result += encode_field_varint(5, program.program_type)
+    # Always encode program_type — the Joule's proto2 definition likely
+    # declares it as `required`. The iOS app always includes it (even when
+    # MANUAL=0). Omitting it causes nanopb to reject the message silently.
+    result += encode_field_varint(5, program.program_type)
     return result
 
 

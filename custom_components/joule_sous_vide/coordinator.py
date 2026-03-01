@@ -561,14 +561,33 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self.api.ensure_connected()
             cook_time_seconds = int(cook_time_minutes * 60)
-            payload = build_start_cook_message(
+            # Try empty addresses first (matches SubmitKeyRequest pattern
+            # that works), then full addresses as fallback.
+            payload_empty = build_start_cook_message(
+                target_temperature,
+                cook_time_seconds,
+                sender=b"",
+                recipient=b"",
+                handle=self._session_handle,
+            )
+            _LOGGER.warning(
+                "StartProgramRequest empty-addrs (%d bytes): %s",
+                len(payload_empty), payload_empty.hex(),
+            )
+            await self.api.write_message(payload_empty)
+
+            payload_full = build_start_cook_message(
                 target_temperature,
                 cook_time_seconds,
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
                 handle=self._session_handle,
             )
-            await self.api.write_message(payload)
+            _LOGGER.warning(
+                "StartProgramRequest full-addrs (%d bytes): %s",
+                len(payload_full), payload_full.hex(),
+            )
+            await self.api.write_message(payload_full)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
 
@@ -616,12 +635,23 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Send a protobuf StopCirculatorRequest to the device."""
         try:
             await self.api.ensure_connected()
-            payload = build_stop_cook_message(
+            payload_empty = build_stop_cook_message(
+                sender=b"",
+                recipient=b"",
+                handle=self._session_handle,
+            )
+            _LOGGER.warning(
+                "StopCirculatorRequest empty-addrs (%d bytes): %s",
+                len(payload_empty), payload_empty.hex(),
+            )
+            await self.api.write_message(payload_empty)
+
+            payload_full = build_stop_cook_message(
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
                 handle=self._session_handle,
             )
-            await self.api.write_message(payload)
+            await self.api.write_message(payload_full)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to stop cooking: {err}") from err
 

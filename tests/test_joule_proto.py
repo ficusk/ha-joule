@@ -233,12 +233,14 @@ class TestCirculatorProgram:
         field_numbers = [fn for fn, _, _ in fields]
         assert 2 not in field_numbers
 
-    def test_manual_program_type_omitted(self):
+    def test_manual_program_type_always_encoded(self):
+        """program_type is always encoded — proto2 required field on the Joule."""
         program = CirculatorProgram(set_point=65.0, program_type=ProgramType.MANUAL)
         data = encode_circulator_program(program)
         fields = decode_fields(data)
-        field_numbers = [fn for fn, _, _ in fields]
-        assert 5 not in field_numbers
+        field_map = {fn: (wt, val) for fn, wt, val in fields}
+        assert 5 in field_map
+        assert field_map[5][1] == 0
 
     def test_automatic_program_type_included(self):
         program = CirculatorProgram(
