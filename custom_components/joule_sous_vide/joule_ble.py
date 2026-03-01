@@ -137,55 +137,21 @@ class JouleBLEAPI:
         """Register a NoInputNoOutput pairing agent with BlueZ via D-Bus.
 
         Returns (bus, True) on success, (None, False) on failure.
+        The agent class is defined in _dbus_agent.py (without PEP 563
+        future annotations) so dbus_fast can read D-Bus type signatures.
         """
         try:
             from dbus_fast.aio import MessageBus
             from dbus_fast import BusType
+            from ._dbus_agent import JouleAgent
         except ImportError:
             _LOGGER.warning("dbus_fast not available — skipping agent")
             return None, False
 
+        bus = None
         try:
             bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-
-            # Register a minimal NoInputNoOutput agent via low-level D-Bus
-            # The agent object path
             agent_path = "/joule_sous_vide/agent"
-
-            # Create a minimal agent interface via introspection XML
-            from dbus_fast.service import ServiceInterface, method
-
-            class JouleAgent(ServiceInterface):
-                """BlueZ pairing agent — auto-accepts Just Works pairing."""
-
-                def __init__(self) -> None:
-                    super().__init__("org.bluez.Agent1")
-
-                @method()
-                def Release(self) -> None:
-                    _LOGGER.warning("Agent: Release called")
-
-                @method()
-                def RequestConfirmation(self, device: "o", passkey: "u") -> None:
-                    _LOGGER.warning(
-                        "Agent: RequestConfirmation device=%s passkey=%s",
-                        device, passkey,
-                    )
-                    # Auto-accept (don't raise = accept)
-
-                @method()
-                def RequestAuthorization(self, device: "o") -> None:
-                    _LOGGER.warning("Agent: RequestAuthorization device=%s", device)
-
-                @method()
-                def AuthorizeService(self, device: "o", uuid: "s") -> None:
-                    _LOGGER.warning(
-                        "Agent: AuthorizeService device=%s uuid=%s", device, uuid,
-                    )
-
-                @method()
-                def Cancel(self) -> None:
-                    _LOGGER.warning("Agent: Cancel called")
 
             agent = JouleAgent()
             bus.export(agent_path, agent)
