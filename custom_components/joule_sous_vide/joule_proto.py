@@ -9,6 +9,7 @@ Wire format reference: https://protobuf.dev/programming-guides/encoding/
 from __future__ import annotations
 
 import logging
+import random
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -259,8 +260,8 @@ class CirculatorDataPoint:
 class StreamMessage:
     """Root envelope for all Joule BLE messages."""
 
-    handle: int = 1  # field 1, fixed32 — non-zero session handle
-    end: bool = True  # field 4, bool — True for standalone messages
+    handle: int = 0  # field 1, fixed32 — 0 means auto-generate random handle
+    end: bool = False  # field 4, bool — omitted when False (iOS app never sends it)
     sender_address: bytes = b""  # field 5, bytes
     recipient_address: bytes = b""  # field 6, bytes
     # oneof contents — at most one of these is set:
@@ -313,9 +314,15 @@ def encode_begin_live_feed_request(request: BeginLiveFeedRequest) -> bytes:
     return encode_field_varint(1, request.feed_id)
 
 
+def _random_handle() -> int:
+    """Generate a random session handle (matches [redacted] SDK behavior)."""
+    return random.randint(1, 2**31 - 1)
+
+
 def encode_stream_message(message: StreamMessage) -> bytes:
     """Encode a complete StreamMessage envelope."""
-    result = encode_field_fixed32(1, message.handle)
+    handle = message.handle if message.handle != 0 else _random_handle()
+    result = encode_field_fixed32(1, handle)
     if message.end:
         result += encode_field_varint(4, 1)
     # senderAddress (field 5) and recipientAddress (field 6) are `required`

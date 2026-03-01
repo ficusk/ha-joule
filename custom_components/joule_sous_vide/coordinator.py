@@ -302,11 +302,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             mac_6 = mac_to_bytes(self.api.mac_address)
 
-            # --- Variant A: empty addresses (14 bytes) ---
+            # --- Variant A: empty addresses (12 bytes) ---
             # All required fields present; addresses are zero-length bytes.
+            # Random handle + no end field (matches iOS app capture).
             msg_empty = StreamMessage(
-                handle=1,
-                end=True,
                 sender_address=b"",
                 recipient_address=b"",
                 start_key_exchange_request=StartKeyExchangeRequest(),
@@ -319,10 +318,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._safe_write("KE-empty-WR", payload_empty, response=True)
             await self._safe_write("KE-empty-WC", payload_empty, response=False)
 
-            # --- Variant B: empty sender + 6-byte MAC recipient (20 bytes) ---
+            # --- Variant B: empty sender + 6-byte MAC recipient ---
             msg_mac6 = StreamMessage(
-                handle=1,
-                end=True,
                 sender_address=b"",
                 recipient_address=mac_6,
                 start_key_exchange_request=StartKeyExchangeRequest(),
