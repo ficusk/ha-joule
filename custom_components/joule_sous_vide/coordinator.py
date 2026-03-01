@@ -171,17 +171,41 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _try_write_and_wait(
         self, label: str, payload: bytes, timeout: float,
     ) -> bool:
-        """Write a payload to 4322 and wait for a notification.
+        """Write a payload to 4322 (write-with-response) and wait for data.
 
-        Uses write-without-response (the Joule's 4322 char is [write] but
-        the official app uses WRITE_TYPE_NO_RESPONSE).  After timeout, falls
-        back to reading 4323 directly.  Returns True if a response arrived.
+        The 4322 characteristic has the [write] property (Write Request only).
+        The official app uses Write Request (response=True) on this char.
+        The write itself has a 10s timeout to avoid blocking forever if the
+        device doesn't send a GATT Write Response.
+
+        After the write, we wait for a notification on 4325 (which triggers
+        a read from 4323).  Returns True if a response arrived.
         """
         _LOGGER.warning(
             "%s (%d bytes): %s", label, len(payload), payload.hex(),
         )
         self._notification_received.clear()
-        await self.api.write_message_no_response(payload)
+
+        # Write with response=True (matches 4322's [write] property).
+        # Timeout the write itself to avoid hanging if device doesn't ACK.
+        write_ok = False
+        try:
+            async with asyncio.timeout(10):
+                await self.api.write_message(payload)
+            _LOGGER.warning("Write-with-response succeeded for %s", label)
+            write_ok = True
+        except TimeoutError:
+            _LOGGER.warning(
+                "Write-with-response timed out for %s — "
+                "device may require encryption", label,
+            )
+        except JouleBLEError as err:
+            _LOGGER.warning(
+                "Write-with-response failed for %s: %s", label, err,
+            )
+
+        if not write_ok:
+            return False
 
         # Wait for notification-triggered-read to process the response
         try:
