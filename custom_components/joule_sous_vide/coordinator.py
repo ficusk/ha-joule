@@ -301,8 +301,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         try:
-            # Send SDK-minimal format for each address (no handle, no end,
-            # no sender — only recipientAddress + StartKeyExchangeRequest)
+            # Send SDK-minimal format for each address to BOTH characteristics:
+            # - 4322 (write-with-response) — the documented write char
+            # - 4326 (write-without-response) — some devices only process WOR
             for label, addr in address_candidates:
                 sdk_payload = b""
                 if addr:
@@ -311,16 +312,24 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     FIELD_START_KEY_EXCHANGE_REQUEST, b""
                 )
                 _LOGGER.warning(
-                    "KEY EXCHANGE SDK-minimal %s (%d bytes): %s",
+                    "KEY EXCHANGE %s (%d bytes): %s",
                     label, len(sdk_payload), sdk_payload.hex(),
                 )
                 self._notification_received.clear()
+                # Write to 4322 (write-with-response)
                 try:
                     async with asyncio.timeout(5):
                         await self.api.write_message(sdk_payload)
-                    _LOGGER.warning("Write OK: %s", label)
+                    _LOGGER.warning("Write 4322 OK: %s", label)
                 except (TimeoutError, JouleBLEError) as err:
-                    _LOGGER.warning("Write FAIL %s: %s", label, err)
+                    _LOGGER.warning("Write 4322 FAIL %s: %s", label, err)
+                # Write same payload to 4326 (write-without-response)
+                try:
+                    async with asyncio.timeout(5):
+                        await self.api.write_to_file_char(sdk_payload)
+                    _LOGGER.warning("Write 4326 OK: %s", label)
+                except (TimeoutError, JouleBLEError) as err:
+                    _LOGGER.warning("Write 4326 FAIL %s: %s", label, err)
 
             # Also try full format (with sender/handle/end) for MAC+0102
             full_payload = build_start_key_exchange_message(
@@ -339,7 +348,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except (TimeoutError, JouleBLEError) as err:
                 _LOGGER.warning("Write FAIL full-fmt MAC+0102: %s", err)
 
-            # Wait the full timeout for any response to any variant
+            # Wait the full timeout for any response
             _LOGGER.warning(
                 "All variants sent — waiting %.0fs for response "
                 "(PRESS JOULE BUTTON NOW!)",
@@ -423,6 +432,12 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
                 _LOGGER.warning("Subscribed to 4325 notifications")
+
+                # Verify CCCD was actually written — v0.9.6 showed it was
+                # 0x0000 before subscribe; if start_notify() didn't enable
+                # it, we manually write it
+                cccd_ok = await self.api.verify_and_enable_notifications()
+                _LOGGER.warning("CCCD verification: %s", "OK" if cccd_ok else "FAILED")
 
             # Step 2: Authenticate if needed
             if not self._authenticated:

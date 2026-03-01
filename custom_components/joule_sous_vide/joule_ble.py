@@ -20,7 +20,6 @@ from homeassistant.core import HomeAssistant
 from .const import (
     FILE_CHAR_UUID,
     JOULE_MANUFACTURER_ID,
-    READ_CHAR_UUID,
     SUBSCRIBE_CHAR_UUID,
     WRITE_CHAR_UUID,
 )
@@ -104,78 +103,6 @@ class JouleBLEAPI:
         await self.connect()
         return True
 
-    async def _query_bluez_dbus(self) -> None:
-        """Query BlueZ D-Bus directly for device properties.
-
-        HA's bluetooth scanner may not expose ManufacturerData even though
-        BlueZ has it cached.  This queries the D-Bus object at the device
-        path to get ALL Device1 properties and extract the circulator address
-        if ManufacturerData is present.
-        """
-        try:
-            from dbus_fast.aio import MessageBus
-            from dbus_fast import BusType, Variant
-        except ImportError:
-            _LOGGER.warning("dbus_fast not available — skipping D-Bus query")
-            return
-
-        dbus_path = (
-            f"/org/bluez/hci0/dev_{self.mac_address.replace(':', '_')}"
-        )
-        bus = None
-        try:
-            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-            introspection = await bus.introspect("org.bluez", dbus_path)
-            proxy = bus.get_proxy_object(
-                "org.bluez", dbus_path, introspection
-            )
-            props = proxy.get_interface("org.freedesktop.DBus.Properties")
-            all_props = await props.call_get_all("org.bluez.Device1")
-
-            # Log all interesting properties
-            for key in (
-                "Name", "Address", "RSSI", "ManufacturerData",
-                "ServiceUUIDs", "ServiceData", "UUIDs",
-            ):
-                if key in all_props:
-                    val = all_props[key]
-                    if isinstance(val, Variant):
-                        val = val.value
-                    _LOGGER.warning("  D-Bus %s = %s", key, val)
-
-            # Extract ManufacturerData if present
-            if "ManufacturerData" in all_props:
-                raw = all_props["ManufacturerData"]
-                if isinstance(raw, Variant):
-                    raw = raw.value
-                for company_id, payload in raw.items():
-                    if isinstance(payload, Variant):
-                        payload = payload.value
-                    payload_bytes = bytes(payload)
-                    _LOGGER.warning(
-                        "  D-Bus ManufacturerData[0x%04X] = %s (%d bytes)",
-                        company_id, payload_bytes.hex(), len(payload_bytes),
-                    )
-                    if company_id == JOULE_MANUFACTURER_ID:
-                        _LOGGER.warning(
-                            "  Found circulator address via D-Bus: %s",
-                            payload_bytes.hex(),
-                        )
-                        self.recipient_address = payload_bytes
-            else:
-                _LOGGER.warning(
-                    "  D-Bus: ManufacturerData property NOT present for %s",
-                    self.mac_address,
-                )
-        except Exception:  # noqa: BLE001
-            _LOGGER.warning("D-Bus query failed for %s (non-fatal)", dbus_path)
-        finally:
-            if bus is not None:
-                try:
-                    bus.disconnect()
-                except Exception:  # noqa: BLE001
-                    pass
-
     async def connect(self) -> None:
         """Open a BLE connection to the device via HA's bluetooth stack."""
         try:
@@ -186,71 +113,17 @@ class JouleBLEAPI:
                 raise JouleBLEError(
                     f"Device {self.mac_address} not found by bluetooth scanner"
                 )
-            # Log BLEDevice details and re-extract manufacturer data if stale
             _LOGGER.warning(
-                "BLEDevice: name=%s, rssi=%s, details=%s",
+                "BLEDevice: name=%s, rssi=%s",
                 ble_device.name,
                 getattr(ble_device, "rssi", "N/A"),
-                ble_device.details,
             )
-            # Re-check manufacturer data at connect time (scanner may have
-            # updated since __init__)
-            for info in async_discovered_service_info(self._hass, connectable=True):
-                if info.address.upper() == self.mac_address.upper():
-                    _LOGGER.warning(
-                        "Manufacturer data at connect: %s",
-                        {hex(k): v.hex() for k, v in info.manufacturer_data.items()},
-                    )
-                    if JOULE_MANUFACTURER_ID in info.manufacturer_data:
-                        fresh = bytes(info.manufacturer_data[JOULE_MANUFACTURER_ID])
-                        if fresh != self.recipient_address:
-                            _LOGGER.warning(
-                                "Updating circulator address: %s -> %s",
-                                self.recipient_address.hex(), fresh.hex(),
-                            )
-                            self.recipient_address = fresh
-                    break
-            # Query BlueZ D-Bus directly for ManufacturerData (HA scanner
-            # may not have it, but BlueZ might have it cached)
-            await self._query_bluez_dbus()
 
             client = await establish_connection(
                 BleakClient, ble_device, self.mac_address
             )
             self._client = client
             _LOGGER.warning("Connected to Joule at %s", self.mac_address)
-
-            # Dump ALL GATT services, characteristics, AND descriptors
-            for service in client.services:
-                _LOGGER.warning("  Service: %s", service.uuid)
-                for char in service.characteristics:
-                    props = ", ".join(char.properties)
-                    _LOGGER.warning(
-                        "    Char: %s [%s] handle=%s",
-                        char.uuid,
-                        props,
-                        char.handle,
-                    )
-                    # Log all descriptors for each characteristic
-                    for desc in char.descriptors:
-                        _LOGGER.warning(
-                            "      Desc: %s handle=%s", desc.uuid, desc.handle,
-                        )
-                        # Read descriptor value (especially CCCD 0x2902)
-                        try:
-                            desc_val = await client.read_gatt_descriptor(
-                                desc.handle
-                            )
-                            _LOGGER.warning(
-                                "      Desc value: %s", bytes(desc_val).hex(),
-                            )
-                        except BleakError as err:
-                            _LOGGER.warning(
-                                "      Desc read failed: %s", err,
-                            )
-
-            # Read ALL readable characteristics for diagnostics
-            await self._read_all_characteristics()
         except BleakError as err:
             self._client = None
             raise JouleBLEError(f"Failed to connect to {self.mac_address}") from err
@@ -262,54 +135,57 @@ class JouleBLEAPI:
                 f"BLE backend error for {self.mac_address}: {err}"
             ) from err
 
-    async def _try_pair(self) -> None:
-        """Attempt BLE pairing/bonding to establish an encrypted link.
+    async def verify_and_enable_notifications(self) -> bool:
+        """Verify CCCD on 4325 is 0x0001, manually write if needed.
 
-        The Joule may require an encrypted BLE link before processing GATT
-        writes.  "Just Works" pairing (no PIN) should succeed per the Joule
-        protocol doc: "no pin or security requirement for pairing."
+        Must be called AFTER subscribe().  Returns True if notifications
+        are confirmed enabled, False otherwise.
+
+        The v0.9.6 GATT dump showed CCCD = 0x0000 (disabled) before subscribe.
+        If bleak's start_notify() didn't successfully write the CCCD, this
+        method writes it manually.
         """
+        if self._client is None:
+            return False
+
+        cccd_uuid = "00002902-0000-1000-8000-00805f9b34fb"
+        for service in self._client.services:
+            for char in service.characteristics:
+                if char.uuid == SUBSCRIBE_CHAR_UUID:
+                    for desc in char.descriptors:
+                        if desc.uuid == cccd_uuid:
+                            return await self._check_and_write_cccd(desc.handle)
+        _LOGGER.warning("CCCD descriptor not found on 4325!")
+        return False
+
+    async def _check_and_write_cccd(self, handle: int) -> bool:
+        """Read CCCD at handle, write 0x0001 if not already enabled."""
         try:
-            _LOGGER.warning("Attempting BLE pair with %s ...", self.mac_address)
-            result = await self._client.pair()
-            _LOGGER.warning("Pair result: %s", result)
-        except (BleakError, Exception) as err:  # noqa: BLE001
+            val = bytes(await self._client.read_gatt_descriptor(handle))
             _LOGGER.warning(
-                "Pair failed (will continue without encryption): %s", err,
+                "CCCD on 4325 (handle %d) after subscribe: %s",
+                handle, val.hex(),
             )
-
-    async def _read_all_characteristics(self) -> None:
-        """Read ALL readable characteristics and log their values.
-
-        This provides diagnostics and may reveal the circulator address
-        in one of the GAP or device-specific characteristics.
-        """
-        READABLE_CHARS = [
-            ("DeviceName", "00002a00-0000-1000-8000-00805f9b34fb"),
-            ("Appearance", "00002a01-0000-1000-8000-00805f9b34fb"),
-            ("PPCP", "00002a04-0000-1000-8000-00805f9b34fb"),
-            ("4323-read", READ_CHAR_UUID),
-            ("4324-unknown", "700b4324-9836-4383-a2b2-31a9098d1473"),
-            ("4325-subscribe", SUBSCRIBE_CHAR_UUID),
-        ]
-        for label, uuid in READABLE_CHARS:
-            try:
-                data = await self._client.read_gatt_char(uuid)
-                raw = bytes(data)
-                # Try to decode as UTF-8 for text characteristics
-                try:
-                    text = raw.decode("utf-8")
-                    _LOGGER.warning(
-                        "READ %s: %d bytes, hex=%s, text='%s'",
-                        label, len(raw), raw.hex(), text,
-                    )
-                except UnicodeDecodeError:
-                    _LOGGER.warning(
-                        "READ %s: %d bytes, hex=%s",
-                        label, len(raw), raw.hex(),
-                    )
-            except BleakError as err:
-                _LOGGER.warning("READ %s failed: %s", label, err)
+            if val == b"\x00\x00":
+                _LOGGER.warning(
+                    "Notifications NOT enabled! Manually writing CCCD 0x0001..."
+                )
+                await self._client.write_gatt_descriptor(
+                    handle, b"\x01\x00"
+                )
+                val2 = bytes(
+                    await self._client.read_gatt_descriptor(handle)
+                )
+                _LOGGER.warning("CCCD after manual write: %s", val2.hex())
+                return val2 == b"\x01\x00"
+            if val == b"\x01\x00":
+                _LOGGER.warning("CCCD correctly shows notifications enabled")
+                return True
+            _LOGGER.warning("CCCD unexpected value: %s", val.hex())
+            return False
+        except BleakError as err:
+            _LOGGER.warning("CCCD verify/write failed: %s", err)
+            return False
 
     async def disconnect(self) -> None:
         """Close the BLE connection."""
@@ -320,92 +196,6 @@ class JouleBLEAPI:
             _LOGGER.warning("Error during disconnect from %s: %s", self.mac_address, err)
         finally:
             self._client = None
-
-    async def pair(self) -> bool:
-        """Attempt BLE pairing/bonding with the device.
-
-        On Linux (BlueZ), registers a D-Bus NoInputNoOutput pairing agent
-        first so that "Just Works" pairing can complete without user
-        interaction.  Returns True if pairing succeeded.
-        """
-        agent_registered = False
-        bus = None
-        try:
-            # Try to register a D-Bus pairing agent (Linux/BlueZ only)
-            bus, agent_registered = await self._register_pairing_agent()
-        except Exception:  # noqa: BLE001
-            _LOGGER.warning("D-Bus agent registration skipped (not Linux?)")
-
-        try:
-            _LOGGER.warning("Attempting BLE pair with %s", self.mac_address)
-            result = await self._client.pair()
-            _LOGGER.warning("Pair result: %s", result)
-            return True
-        except (BleakError, Exception) as err:  # noqa: BLE001
-            _LOGGER.warning("Pair failed (non-fatal): %s", err)
-            return False
-        finally:
-            if agent_registered and bus is not None:
-                await self._unregister_pairing_agent(bus)
-
-    async def _register_pairing_agent(self) -> tuple[Any, bool]:
-        """Register a NoInputNoOutput pairing agent with BlueZ via D-Bus.
-
-        Returns (bus, True) on success, (None, False) on failure.
-        The agent class is defined in _dbus_agent.py (without PEP 563
-        future annotations) so dbus_fast can read D-Bus type signatures.
-        """
-        try:
-            from dbus_fast.aio import MessageBus
-            from dbus_fast import BusType
-            from ._dbus_agent import JouleAgent
-        except ImportError:
-            _LOGGER.warning("dbus_fast not available — skipping agent")
-            return None, False
-
-        bus = None
-        try:
-            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-            agent_path = "/joule_sous_vide/agent"
-
-            agent = JouleAgent()
-            bus.export(agent_path, agent)
-
-            # Call AgentManager1.RegisterAgent + RequestDefaultAgent
-            introspection = await bus.introspect("org.bluez", "/org/bluez")
-            proxy = bus.get_proxy_object(
-                "org.bluez", "/org/bluez", introspection,
-            )
-            agent_mgr = proxy.get_interface("org.bluez.AgentManager1")
-            await agent_mgr.call_register_agent(agent_path, "NoInputNoOutput")
-            await agent_mgr.call_request_default_agent(agent_path)
-            _LOGGER.warning("D-Bus pairing agent registered at %s", agent_path)
-            return bus, True
-
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Failed to register D-Bus agent: %s", err)
-            if bus is not None:
-                bus.disconnect()
-            return None, False
-
-    async def _unregister_pairing_agent(self, bus: Any) -> None:
-        """Unregister the pairing agent and disconnect the D-Bus bus."""
-        try:
-            agent_path = "/joule_sous_vide/agent"
-            introspection = await bus.introspect("org.bluez", "/org/bluez")
-            proxy = bus.get_proxy_object(
-                "org.bluez", "/org/bluez", introspection,
-            )
-            agent_mgr = proxy.get_interface("org.bluez.AgentManager1")
-            await agent_mgr.call_unregister_agent(agent_path)
-            _LOGGER.warning("D-Bus pairing agent unregistered")
-        except Exception:  # noqa: BLE001
-            _LOGGER.warning("Failed to unregister D-Bus agent (non-fatal)")
-        finally:
-            try:
-                bus.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
 
     async def write_message(self, payload: bytes) -> None:
         """Write a protobuf-encoded message to the device (write-with-response)."""
