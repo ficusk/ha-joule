@@ -252,19 +252,45 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The Joule uses its own key exchange (NOT OS-level BLE pairing).
         The user must press the button on top of the Joule within 60 seconds.
 
-        The recipient_address is the 8-byte circulator address extracted from
-        BLE manufacturer advertising data (company ID 0x0159).  The sender is
-        an arbitrary 8-byte identifier (SDK default "aabbaabbaabbaabb").
+        Since we cannot reliably get the 8-byte circulator address from BLE
+        manufacturer data (HA scanner returns empty), this method tries
+        multiple address constructions derived from the MAC.  Messages use
+        the SDK-minimal format: only recipientAddress + StartKeyExchangeRequest
+        (no handle, no end, no senderAddress — matching how the SDK builds
+        StreamMessages).  The full format (with sender/handle/end) is also
+        tried for the most likely address.
         """
         from homeassistant.components.persistent_notification import (
             async_create,
             async_dismiss,
         )
+        from .joule_ble import mac_to_bytes
+        from .joule_proto import (
+            encode_field_bytes,
+            FIELD_START_KEY_EXCHANGE_REQUEST,
+        )
+
+        mac_bytes = mac_to_bytes(self.api.mac_address)  # 6 bytes MSB
+        mac_rev = mac_bytes[::-1]  # 6 bytes LSB
+
+        # Build address candidates: various 8-byte constructions from MAC
+        address_candidates: list[tuple[str, bytes]] = [
+            ("MAC+0102", mac_bytes + b"\x01\x02"),
+            ("MAC+0000", mac_bytes + b"\x00\x00"),
+            ("rMAC+0102", mac_rev + b"\x01\x02"),
+            ("rMAC+0000", mac_rev + b"\x00\x00"),
+            ("no-addr", b""),
+        ]
+
+        # If manufacturer data provided a different address, try it first
+        mfr_addr = self.api.recipient_address
+        is_padded_mac = mfr_addr == mac_bytes + b"\x00\x00"
+        if not is_padded_mac and len(mfr_addr) == 8:
+            address_candidates.insert(0, ("mfr-data", mfr_addr))
 
         _LOGGER.warning(
-            "Starting key exchange — recipient=%s sender=%s",
-            self.api.recipient_address.hex(),
-            self.api.sender_address.hex(),
+            "Starting key exchange — trying %d address variants",
+            len(address_candidates),
         )
         async_create(
             self.hass,
@@ -274,15 +300,61 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             notification_id="joule_sous_vide_pairing",
         )
 
-        payload = build_start_key_exchange_message(
-            sender=self.api.sender_address,
-            recipient=self.api.recipient_address,
-        )
-
         try:
+            # Send SDK-minimal format for each address (no handle, no end,
+            # no sender — only recipientAddress + StartKeyExchangeRequest)
+            for label, addr in address_candidates:
+                sdk_payload = b""
+                if addr:
+                    sdk_payload += encode_field_bytes(6, addr)
+                sdk_payload += encode_field_bytes(
+                    FIELD_START_KEY_EXCHANGE_REQUEST, b""
+                )
+                _LOGGER.warning(
+                    "KEY EXCHANGE SDK-minimal %s (%d bytes): %s",
+                    label, len(sdk_payload), sdk_payload.hex(),
+                )
+                self._notification_received.clear()
+                try:
+                    async with asyncio.timeout(5):
+                        await self.api.write_message(sdk_payload)
+                    _LOGGER.warning("Write OK: %s", label)
+                except (TimeoutError, JouleBLEError) as err:
+                    _LOGGER.warning("Write FAIL %s: %s", label, err)
+
+            # Also try full format (with sender/handle/end) for MAC+0102
+            full_payload = build_start_key_exchange_message(
+                sender=self.api.sender_address,
+                recipient=mac_bytes + b"\x01\x02",
+            )
+            _LOGGER.warning(
+                "KEY EXCHANGE full-fmt MAC+0102 (%d bytes): %s",
+                len(full_payload), full_payload.hex(),
+            )
+            self._notification_received.clear()
+            try:
+                async with asyncio.timeout(5):
+                    await self.api.write_message(full_payload)
+                _LOGGER.warning("Write OK: full-fmt MAC+0102")
+            except (TimeoutError, JouleBLEError) as err:
+                _LOGGER.warning("Write FAIL full-fmt MAC+0102: %s", err)
+
+            # Wait the full timeout for any response to any variant
+            _LOGGER.warning(
+                "All variants sent — waiting %.0fs for response "
+                "(PRESS JOULE BUTTON NOW!)",
+                self.KEY_EXCHANGE_TIMEOUT,
+            )
+            # Re-send the most likely candidate and wait
+            best_payload = b""
+            best_addr = mac_bytes + b"\x01\x02"
+            best_payload += encode_field_bytes(6, best_addr)
+            best_payload += encode_field_bytes(
+                FIELD_START_KEY_EXCHANGE_REQUEST, b""
+            )
             got_reply = await self._try_write_and_wait(
-                "StartKeyExchangeRequest",
-                payload,
+                "KeyExchange-wait",
+                best_payload,
                 self.KEY_EXCHANGE_TIMEOUT,
             )
 
@@ -291,8 +363,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return await self._submit_key(self._auth_key)
 
             _LOGGER.warning(
-                "Key exchange timed out — no response after %.0fs",
-                self.KEY_EXCHANGE_TIMEOUT,
+                "Key exchange timed out — no address variant got a response"
             )
             return False
 

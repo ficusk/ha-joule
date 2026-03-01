@@ -104,6 +104,78 @@ class JouleBLEAPI:
         await self.connect()
         return True
 
+    async def _query_bluez_dbus(self) -> None:
+        """Query BlueZ D-Bus directly for device properties.
+
+        HA's bluetooth scanner may not expose ManufacturerData even though
+        BlueZ has it cached.  This queries the D-Bus object at the device
+        path to get ALL Device1 properties and extract the circulator address
+        if ManufacturerData is present.
+        """
+        try:
+            from dbus_fast.aio import MessageBus
+            from dbus_fast import BusType, Variant
+        except ImportError:
+            _LOGGER.warning("dbus_fast not available — skipping D-Bus query")
+            return
+
+        dbus_path = (
+            f"/org/bluez/hci0/dev_{self.mac_address.replace(':', '_')}"
+        )
+        bus = None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            introspection = await bus.introspect("org.bluez", dbus_path)
+            proxy = bus.get_proxy_object(
+                "org.bluez", dbus_path, introspection
+            )
+            props = proxy.get_interface("org.freedesktop.DBus.Properties")
+            all_props = await props.call_get_all("org.bluez.Device1")
+
+            # Log all interesting properties
+            for key in (
+                "Name", "Address", "RSSI", "ManufacturerData",
+                "ServiceUUIDs", "ServiceData", "UUIDs",
+            ):
+                if key in all_props:
+                    val = all_props[key]
+                    if isinstance(val, Variant):
+                        val = val.value
+                    _LOGGER.warning("  D-Bus %s = %s", key, val)
+
+            # Extract ManufacturerData if present
+            if "ManufacturerData" in all_props:
+                raw = all_props["ManufacturerData"]
+                if isinstance(raw, Variant):
+                    raw = raw.value
+                for company_id, payload in raw.items():
+                    if isinstance(payload, Variant):
+                        payload = payload.value
+                    payload_bytes = bytes(payload)
+                    _LOGGER.warning(
+                        "  D-Bus ManufacturerData[0x%04X] = %s (%d bytes)",
+                        company_id, payload_bytes.hex(), len(payload_bytes),
+                    )
+                    if company_id == JOULE_MANUFACTURER_ID:
+                        _LOGGER.warning(
+                            "  Found circulator address via D-Bus: %s",
+                            payload_bytes.hex(),
+                        )
+                        self.recipient_address = payload_bytes
+            else:
+                _LOGGER.warning(
+                    "  D-Bus: ManufacturerData property NOT present for %s",
+                    self.mac_address,
+                )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("D-Bus query failed for %s (non-fatal)", dbus_path)
+        finally:
+            if bus is not None:
+                try:
+                    bus.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def connect(self) -> None:
         """Open a BLE connection to the device via HA's bluetooth stack."""
         try:
@@ -138,6 +210,10 @@ class JouleBLEAPI:
                             )
                             self.recipient_address = fresh
                     break
+            # Query BlueZ D-Bus directly for ManufacturerData (HA scanner
+            # may not have it, but BlueZ might have it cached)
+            await self._query_bluez_dbus()
+
             client = await establish_connection(
                 BleakClient, ble_device, self.mac_address
             )
