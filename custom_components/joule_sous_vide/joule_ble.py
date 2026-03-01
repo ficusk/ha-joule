@@ -220,11 +220,7 @@ class JouleBLEAPI:
             self._client = client
             _LOGGER.warning("Connected to Joule at %s", self.mac_address)
 
-            # Step 1: Attempt BLE pairing to establish encrypted link.
-            # The Joule may silently ignore writes on unencrypted connections.
-            await self._try_pair()
-
-            # Step 2: Dump ALL GATT services, characteristics, AND descriptors
+            # Dump ALL GATT services, characteristics, AND descriptors
             for service in client.services:
                 _LOGGER.warning("  Service: %s", service.uuid)
                 for char in service.characteristics:
@@ -253,7 +249,7 @@ class JouleBLEAPI:
                                 "      Desc read failed: %s", err,
                             )
 
-            # Step 3: Read ALL readable characteristics for diagnostics
+            # Read ALL readable characteristics for diagnostics
             await self._read_all_characteristics()
         except BleakError as err:
             self._client = None
