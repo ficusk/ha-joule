@@ -16,5 +16,19 @@
     "abort": {
       "already_configured": "This Joule device is already configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Joule Options",
+        "description": "Paste a BLE auth key captured from the official app (hex string). Leave empty to clear.",
+        "data": {
+          "ble_auth_key": "BLE Auth Key"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth_key": "Invalid hex string. The auth key must be a valid hexadecimal value."
+    }
   }
 }

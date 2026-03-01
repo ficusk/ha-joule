@@ -7,6 +7,7 @@ DOMAIN: Final = "joule_sous_vide"
 
 # Configuration keys
 CONF_MAC_ADDRESS: Final = "mac_address"
+CONF_BLE_AUTH_KEY: Final = "ble_auth_key"
 
 # Defaults
 DEFAULT_TARGET_TEMPERATURE: Final = 60.0  # °C

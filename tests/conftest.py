@@ -41,6 +41,7 @@ def mock_ble_api():
         instance.write_message_no_response = AsyncMock()
         instance.write_to_file_char = AsyncMock()
         instance.subscribe = AsyncMock()
+        instance.enable_service_changed_indications = AsyncMock(return_value=True)
         instance.verify_and_enable_notifications = AsyncMock(return_value=True)
         instance.read_characteristic = AsyncMock(return_value=None)
         instance.sender_address = bytes.fromhex("aabbaabbaabbaabb")

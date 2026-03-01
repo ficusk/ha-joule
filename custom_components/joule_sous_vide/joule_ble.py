@@ -276,6 +276,50 @@ class JouleBLEAPI:
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("D-Bus MTU exchange failed: %s", err)
 
+    async def enable_service_changed_indications(self) -> bool:
+        """Enable indications on the Service Changed characteristic (0x2A05).
+
+        The Joule firmware requires Service Changed indications to be enabled
+        before it will process any application-level commands.  The official
+        iOS app writes 0x0200 (enable indications) to the CCCD on 0x2A05 as
+        the very first GATT operation after connecting.
+        """
+        if self._client is None:
+            return False
+
+        service_changed_uuid = "00002a05-0000-1000-8000-00805f9b34fb"
+        cccd_uuid = "00002902-0000-1000-8000-00805f9b34fb"
+
+        for service in self._client.services:
+            for char in service.characteristics:
+                if char.uuid == service_changed_uuid:
+                    for desc in char.descriptors:
+                        if desc.uuid == cccd_uuid:
+                            try:
+                                await self._client.write_gatt_descriptor(
+                                    desc.handle, b"\x02\x00"
+                                )
+                                _LOGGER.warning(
+                                    "Service Changed indications enabled "
+                                    "(handle %d)",
+                                    desc.handle,
+                                )
+                                return True
+                            except BleakError as err:
+                                _LOGGER.warning(
+                                    "Failed to enable Service Changed "
+                                    "indications: %s",
+                                    err,
+                                )
+                                return False
+                    _LOGGER.warning(
+                        "Service Changed char found but no CCCD descriptor"
+                    )
+                    return False
+
+        _LOGGER.warning("Service Changed characteristic (0x2A05) not found")
+        return False
+
     async def verify_and_enable_notifications(self) -> bool:
         """Verify CCCD on 4325 is 0x0001, manually write if needed.
 

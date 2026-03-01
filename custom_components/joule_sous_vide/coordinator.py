@@ -12,6 +12,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_BLE_AUTH_KEY,
     CONF_MAC_ADDRESS,
     DEFAULT_COOK_TIME_MINUTES,
     DEFAULT_SCAN_INTERVAL,
@@ -34,9 +35,6 @@ from .joule_proto import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-# Config entry option key for persisted BLE auth key
-CONF_BLE_AUTH_KEY = "ble_auth_key"
 
 
 class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -423,6 +421,14 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Step 1: Subscribe to notifications on 4325
             if not self._subscribed:
+                # Enable Service Changed indications first (required by Joule
+                # firmware — the official iOS app does this before anything else)
+                sc_ok = await self.api.enable_service_changed_indications()
+                _LOGGER.warning(
+                    "Service Changed indications: %s",
+                    "enabled" if sc_ok else "not available",
+                )
+
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
                 _LOGGER.warning("Subscribed to 4325 notifications")
