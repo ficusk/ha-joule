@@ -52,12 +52,14 @@ def mock_ble_api():
 
 @pytest.fixture(autouse=True)
 def _fast_notification_timeout(monkeypatch: pytest.MonkeyPatch):
-    """Patch NOTIFICATION_TIMEOUT on the class so all tests run fast.
+    """Patch NOTIFICATION_TIMEOUT and KEY_EXCHANGE_TIMEOUT on the class so
+    all tests run fast.
 
     This applies before the coordinator is instantiated, so the first
     refresh during async_config_entry_first_refresh uses the patched value.
     """
     monkeypatch.setattr(JouleCoordinator, "NOTIFICATION_TIMEOUT", 0.01)
+    monkeypatch.setattr(JouleCoordinator, "KEY_EXCHANGE_TIMEOUT", 0.01)
 
 
 @pytest.fixture(autouse=True)
