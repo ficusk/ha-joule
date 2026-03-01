@@ -53,6 +53,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     NOTIFICATION_TIMEOUT: float = 10.0  # seconds; overridden in tests
     KEY_EXCHANGE_TIMEOUT: float = 60.0  # seconds; user must press button
+    DIAG_SLEEP: float = 2.0  # diagnostic sleep between reads; patched in tests
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._entry = entry
@@ -246,111 +247,62 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return data
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Diagnostic v0.8.7: BLE pairing + raw handshake + GAP reads.
+        """Diagnostic v0.8.8: Pair with recovery, then test protobuf.
 
-        v0.8.6 confirmed 4325 data (00010203) is STATIC — not a response.
-        The device accepts GATT writes but the firmware ignores our protobuf.
-        This version tests whether BLE-level pairing or a raw handshake
-        (writing 4324 nonce directly to 4322) activates the command handler.
+        v0.8.7 revealed the connection goes through an ESPHome BLE proxy
+        (btproxy02) which cannot perform pairing.  The pair() call kills
+        the connection.  This version:
+        1. Logs adapter details (local vs proxy)
+        2. Attempts pair — if it kills the connection, reconnects
+        3. After (re-)connection, subscribes and writes protobuf
+        4. Waits for notification with keepalive polling
         """
         try:
+            # === STEP 1: Connect + log adapter info ===
             reconnected = await self.api.ensure_connected()
             if reconnected:
                 _LOGGER.warning("Fresh BLE connection — will re-subscribe")
                 self._subscribed = False
                 self._authenticated = False
 
-            # === STEP 1: Read GAP characteristics for firmware info ===
-            _LOGGER.warning("=== STEP 1: GAP characteristics ===")
-            gap_name = await self.api.read_characteristic(
-                "00002a00-0000-1000-8000-00805f9b34fb"
-            )
-            if gap_name:
-                try:
-                    _LOGGER.warning(
-                        "Device Name: %s (hex: %s)",
-                        bytes(gap_name).decode("utf-8", errors="replace"),
-                        gap_name.hex(),
-                    )
-                except Exception:  # noqa: BLE001
-                    _LOGGER.warning("Device Name (raw): %s", gap_name.hex())
+            # === STEP 2: Attempt BLE pairing ===
+            _LOGGER.warning("=== STEP 2: BLE pairing attempt ===")
+            pair_ok = await self.api.pair()
+            _LOGGER.warning("Pair returned: %s", pair_ok)
 
-            gap_appearance = await self.api.read_characteristic(
-                "00002a01-0000-1000-8000-00805f9b34fb"
+            # Check if connection survived pairing
+            connected = (
+                self.api._client is not None
+                and self.api._client.is_connected
             )
-            if gap_appearance:
-                _LOGGER.warning("Appearance: %s", gap_appearance.hex())
-
-            gap_params = await self.api.read_characteristic(
-                "00002a04-0000-1000-8000-00805f9b34fb"
+            _LOGGER.warning(
+                "Connection after pair: %s",
+                "ALIVE" if connected else "DEAD — will reconnect",
             )
-            if gap_params:
-                _LOGGER.warning("Preferred Conn Params: %s", gap_params.hex())
 
-            # === STEP 2: Subscribe + baseline reads ===
-            _LOGGER.warning("=== STEP 2: Subscribe + baseline ===")
+            if not connected:
+                # Pairing killed the connection — reconnect
+                _LOGGER.warning("Reconnecting after pair...")
+                self.api._client = None  # clear stale client
+                await self.api.connect()
+                self._subscribed = False
+                _LOGGER.warning("Reconnected successfully")
+
+            # === STEP 3: Subscribe + baseline reads ===
+            _LOGGER.warning("=== STEP 3: Subscribe + baseline ===")
             if not self._subscribed:
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True
 
-            char_4324 = "700b4324-9836-4383-a2b2-31a9098d1473"
-            nonce_4324 = await self._read_and_log(char_4324, "4324 nonce")
-            baseline_4325 = await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "BASELINE 4325",
+            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "BASELINE 4325")
+            await self._read_and_log(READ_CHAR_UUID, "BASELINE 4323")
+
+            # === STEP 4: Write Ping protobuf ===
+            _LOGGER.warning("=== STEP 4: Write Ping ===")
+            from .joule_proto import (
+                StreamMessage, Ping, BeginLiveFeedRequest,
+                StartKeyExchangeRequest, encode_stream_message,
             )
-            baseline_4323 = await self._read_and_log(
-                READ_CHAR_UUID, "BASELINE 4323",
-            )
-
-            # === STEP 3: Attempt BLE pairing ===
-            _LOGGER.warning("=== STEP 3: BLE pairing attempt ===")
-            await self.api.pair()
-
-            # Check if pairing changed anything
-            post_pair_4325 = await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 AFTER PAIR",
-            )
-            post_pair_4323 = await self._read_and_log(
-                READ_CHAR_UUID, "4323 AFTER PAIR",
-            )
-
-            # === STEP 4: Raw handshake — write 4324 nonce to 4322 ===
-            _LOGGER.warning("=== STEP 4: Raw nonce handshake ===")
-            if nonce_4324 and len(nonce_4324) > 0:
-                _LOGGER.warning(
-                    "Writing RAW 4324 nonce to 4322 (%d bytes): %s",
-                    len(nonce_4324), nonce_4324.hex(),
-                )
-                try:
-                    await self.api.write_message(nonce_4324)
-                    _LOGGER.warning("Raw nonce write to 4322 succeeded")
-                except JouleBLEError as err:
-                    _LOGGER.warning("Raw nonce write failed: %s", err)
-
-                await self._read_and_log(
-                    SUBSCRIBE_CHAR_UUID, "4325 after raw nonce",
-                )
-                await self._read_and_log(
-                    READ_CHAR_UUID, "4323 after raw nonce",
-                )
-
-                # Check if 4324 nonce changed after writing it back
-                new_4324 = await self._read_and_log(
-                    char_4324, "4324 after raw nonce write",
-                )
-
-                # Wait 1s and check again
-                await asyncio.sleep(1)
-                await self._read_and_log(
-                    SUBSCRIBE_CHAR_UUID, "4325 1s after raw nonce",
-                )
-                await self._read_and_log(
-                    READ_CHAR_UUID, "4323 1s after raw nonce",
-                )
-
-            # === STEP 5: Write by HANDLE instead of UUID ===
-            _LOGGER.warning("=== STEP 5: Write Ping by handle 16 ===")
-            from .joule_proto import StreamMessage, Ping, encode_stream_message
 
             recipient = self.api.recipient_address
             payload_ping = encode_stream_message(StreamMessage(
@@ -359,58 +311,92 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ping=Ping(),
             ))
             _LOGGER.warning(
-                "WRITE Ping by HANDLE 16 (%d bytes): %s",
+                "WRITE Ping → 4322 (%d bytes): %s",
                 len(payload_ping), payload_ping.hex(),
             )
-            try:
-                await self.api._client.write_gatt_char(
-                    16, bytearray(payload_ping), response=True,
-                )
-                _LOGGER.warning("Write Ping by handle 16 succeeded")
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.warning("Write Ping by handle 16 failed: %s", err)
+            await self.api.write_message(payload_ping)
+            _LOGGER.warning("Write Ping succeeded")
+
+            # Immediate read
+            await self._read_and_log(SUBSCRIBE_CHAR_UUID, "4325 after Ping")
+            await self._read_and_log(READ_CHAR_UUID, "4323 after Ping")
+
+            # Wait 2s for async response
+            await asyncio.sleep(self.DIAG_SLEEP)
+            await self._read_and_log(
+                SUBSCRIBE_CHAR_UUID, "4325 2s after Ping",
+            )
+            await self._read_and_log(READ_CHAR_UUID, "4323 2s after Ping")
+
+            # === STEP 5: Write StartKeyExchange ===
+            _LOGGER.warning("=== STEP 5: Write StartKeyExchange ===")
+            payload_ke = encode_stream_message(StreamMessage(
+                handle=0, end=False,
+                recipient_address=recipient,
+                start_key_exchange_request=StartKeyExchangeRequest(),
+            ))
+            _LOGGER.warning(
+                "WRITE StartKeyExchange → 4322 (%d bytes): %s",
+                len(payload_ke), payload_ke.hex(),
+            )
+            await self.api.write_message(payload_ke)
+            _LOGGER.warning("Write StartKeyExchange succeeded")
 
             await self._read_and_log(
-                SUBSCRIBE_CHAR_UUID, "4325 after handle-write Ping",
+                SUBSCRIBE_CHAR_UUID, "4325 after KeyExchange",
             )
             await self._read_and_log(
-                READ_CHAR_UUID, "4323 after handle-write Ping",
+                READ_CHAR_UUID, "4323 after KeyExchange",
             )
 
-            # === STEP 6: Subscribe to Service Changed indications ===
-            _LOGGER.warning("=== STEP 6: Service Changed indications ===")
-            try:
-                svc_changed_uuid = "00002a05-0000-1000-8000-00805f9b34fb"
-                await self.api._client.start_notify(
-                    svc_changed_uuid,
-                    lambda c, d: _LOGGER.warning(
-                        "SERVICE CHANGED indication: %d bytes: %s",
-                        len(d), d.hex(),
-                    ),
-                )
-                _LOGGER.warning("Subscribed to Service Changed (handle 10)")
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.warning("Service Changed subscribe failed: %s", err)
+            # Wait 5s — key exchange may need button press
+            _LOGGER.warning("Waiting 5s for key exchange response...")
+            await asyncio.sleep(self.DIAG_SLEEP)
+            await self._read_and_log(
+                SUBSCRIBE_CHAR_UUID, "4325 5s after KeyExchange",
+            )
+            await self._read_and_log(
+                READ_CHAR_UUID, "4323 5s after KeyExchange",
+            )
 
-            # === STEP 7: Write raw single-byte probes to 4322 ===
-            _LOGGER.warning("=== STEP 7: Raw byte probes ===")
-            for raw_byte, desc in [
-                (b"\x00", "0x00"),
-                (b"\x01", "0x01"),
-                (b"\x08\x01", "varint field1=1"),
-            ]:
-                _LOGGER.warning("Writing raw %s to 4322", desc)
-                try:
-                    await self.api.write_message(raw_byte)
-                    _LOGGER.warning("Raw %s write succeeded", desc)
-                    r = await self._read_and_log(
-                        SUBSCRIBE_CHAR_UUID, f"4325 after raw {desc}",
-                    )
-                    await self._read_and_log(
-                        READ_CHAR_UUID, f"4323 after raw {desc}",
-                    )
-                except JouleBLEError as err:
-                    _LOGGER.warning("Raw %s write failed: %s", desc, err)
+            # === STEP 6: Write BeginLiveFeed ===
+            _LOGGER.warning("=== STEP 6: Write BeginLiveFeed ===")
+            payload_lf = encode_stream_message(StreamMessage(
+                handle=0, end=False,
+                recipient_address=recipient,
+                begin_live_feed_request=BeginLiveFeedRequest(),
+            ))
+            _LOGGER.warning(
+                "WRITE BeginLiveFeed → 4322 (%d bytes): %s",
+                len(payload_lf), payload_lf.hex(),
+            )
+            await self.api.write_message(payload_lf)
+            _LOGGER.warning("Write BeginLiveFeed succeeded")
+
+            await self._read_and_log(
+                SUBSCRIBE_CHAR_UUID, "4325 after LiveFeed",
+            )
+            await self._read_and_log(
+                READ_CHAR_UUID, "4323 after LiveFeed",
+            )
+
+            # Wait 2s
+            await asyncio.sleep(self.DIAG_SLEEP)
+            await self._read_and_log(
+                SUBSCRIBE_CHAR_UUID, "4325 2s after LiveFeed",
+            )
+            await self._read_and_log(
+                READ_CHAR_UUID, "4323 2s after LiveFeed",
+            )
+
+            # === Summary: check notification flag ===
+            if self._notification_received.is_set():
+                _LOGGER.warning("SUCCESS: notification was received!")
+            else:
+                _LOGGER.warning(
+                    "No notification received. Check logs for adapter type "
+                    "(proxy vs local).",
+                )
 
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err

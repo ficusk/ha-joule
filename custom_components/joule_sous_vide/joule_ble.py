@@ -62,6 +62,13 @@ class JouleBLEAPI:
                 raise JouleBLEError(
                     f"Device {self.mac_address} not found by bluetooth scanner"
                 )
+            # Log BLEDevice details to identify adapter (local vs proxy)
+            _LOGGER.warning(
+                "BLEDevice: name=%s, rssi=%s, details=%s",
+                ble_device.name,
+                getattr(ble_device, "rssi", "N/A"),
+                ble_device.details,
+            )
             client = await establish_connection(
                 BleakClient, ble_device, self.mac_address
             )
@@ -99,14 +106,125 @@ class JouleBLEAPI:
         finally:
             self._client = None
 
-    async def pair(self) -> None:
-        """Attempt BLE pairing/bonding with the device."""
+    async def pair(self) -> bool:
+        """Attempt BLE pairing/bonding with the device.
+
+        On Linux (BlueZ), registers a D-Bus NoInputNoOutput pairing agent
+        first so that "Just Works" pairing can complete without user
+        interaction.  Returns True if pairing succeeded.
+        """
+        agent_registered = False
+        bus = None
+        try:
+            # Try to register a D-Bus pairing agent (Linux/BlueZ only)
+            bus, agent_registered = await self._register_pairing_agent()
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("D-Bus agent registration skipped (not Linux?)")
+
         try:
             _LOGGER.warning("Attempting BLE pair with %s", self.mac_address)
             result = await self._client.pair()
             _LOGGER.warning("Pair result: %s", result)
+            return True
         except (BleakError, Exception) as err:  # noqa: BLE001
             _LOGGER.warning("Pair failed (non-fatal): %s", err)
+            return False
+        finally:
+            if agent_registered and bus is not None:
+                await self._unregister_pairing_agent(bus)
+
+    async def _register_pairing_agent(self) -> tuple[Any, bool]:
+        """Register a NoInputNoOutput pairing agent with BlueZ via D-Bus.
+
+        Returns (bus, True) on success, (None, False) on failure.
+        """
+        try:
+            from dbus_fast.aio import MessageBus
+            from dbus_fast import BusType
+        except ImportError:
+            _LOGGER.warning("dbus_fast not available — skipping agent")
+            return None, False
+
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+
+            # Register a minimal NoInputNoOutput agent via low-level D-Bus
+            # The agent object path
+            agent_path = "/joule_sous_vide/agent"
+
+            # Create a minimal agent interface via introspection XML
+            from dbus_fast.service import ServiceInterface, method
+
+            class JouleAgent(ServiceInterface):
+                """BlueZ pairing agent — auto-accepts Just Works pairing."""
+
+                def __init__(self) -> None:
+                    super().__init__("org.bluez.Agent1")
+
+                @method()
+                def Release(self) -> None:
+                    _LOGGER.warning("Agent: Release called")
+
+                @method()
+                def RequestConfirmation(self, device: "o", passkey: "u") -> None:
+                    _LOGGER.warning(
+                        "Agent: RequestConfirmation device=%s passkey=%s",
+                        device, passkey,
+                    )
+                    # Auto-accept (don't raise = accept)
+
+                @method()
+                def RequestAuthorization(self, device: "o") -> None:
+                    _LOGGER.warning("Agent: RequestAuthorization device=%s", device)
+
+                @method()
+                def AuthorizeService(self, device: "o", uuid: "s") -> None:
+                    _LOGGER.warning(
+                        "Agent: AuthorizeService device=%s uuid=%s", device, uuid,
+                    )
+
+                @method()
+                def Cancel(self) -> None:
+                    _LOGGER.warning("Agent: Cancel called")
+
+            agent = JouleAgent()
+            bus.export(agent_path, agent)
+
+            # Call AgentManager1.RegisterAgent + RequestDefaultAgent
+            introspection = await bus.introspect("org.bluez", "/org/bluez")
+            proxy = bus.get_proxy_object(
+                "org.bluez", "/org/bluez", introspection,
+            )
+            agent_mgr = proxy.get_interface("org.bluez.AgentManager1")
+            await agent_mgr.call_register_agent(agent_path, "NoInputNoOutput")
+            await agent_mgr.call_request_default_agent(agent_path)
+            _LOGGER.warning("D-Bus pairing agent registered at %s", agent_path)
+            return bus, True
+
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Failed to register D-Bus agent: %s", err)
+            if bus is not None:
+                bus.disconnect()
+            return None, False
+
+    async def _unregister_pairing_agent(self, bus: Any) -> None:
+        """Unregister the pairing agent and disconnect the D-Bus bus."""
+        try:
+            agent_path = "/joule_sous_vide/agent"
+            introspection = await bus.introspect("org.bluez", "/org/bluez")
+            proxy = bus.get_proxy_object(
+                "org.bluez", "/org/bluez", introspection,
+            )
+            agent_mgr = proxy.get_interface("org.bluez.AgentManager1")
+            await agent_mgr.call_unregister_agent(agent_path)
+            _LOGGER.warning("D-Bus pairing agent unregistered")
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Failed to unregister D-Bus agent (non-fatal)")
+        finally:
+            try:
+                bus.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def write_message(self, payload: bytes) -> None:
         """Write a protobuf-encoded message to the device (write-with-response)."""

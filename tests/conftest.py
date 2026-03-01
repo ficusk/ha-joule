@@ -40,7 +40,7 @@ def mock_ble_api():
         instance.write_message = AsyncMock()
         instance.write_message_no_response = AsyncMock()
         instance.write_to_file_char = AsyncMock()
-        instance.pair = AsyncMock()
+        instance.pair = AsyncMock(return_value=False)
         instance.subscribe = AsyncMock()
         instance.read_characteristic = AsyncMock(return_value=None)
         instance.sender_address = b"\x01\x00\x00\x00\x00\x01"
@@ -60,6 +60,7 @@ def _fast_notification_timeout(monkeypatch: pytest.MonkeyPatch):
     """
     monkeypatch.setattr(JouleCoordinator, "NOTIFICATION_TIMEOUT", 0.01)
     monkeypatch.setattr(JouleCoordinator, "KEY_EXCHANGE_TIMEOUT", 0.01)
+    monkeypatch.setattr(JouleCoordinator, "DIAG_SLEEP", 0.0)
 
 
 @pytest.fixture(autouse=True)
