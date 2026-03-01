@@ -123,7 +123,11 @@ class JouleBLEAPI:
                 BleakClient, ble_device, self.mac_address
             )
             self._client = client
-            _LOGGER.warning("Connected to Joule at %s", self.mac_address)
+            _LOGGER.warning(
+                "Connected to Joule at %s (MTU=%d)",
+                self.mac_address,
+                client.mtu_size,
+            )
         except BleakError as err:
             self._client = None
             raise JouleBLEError(f"Failed to connect to {self.mac_address}") from err

@@ -26,6 +26,7 @@ from .joule_proto import (
     CirculatorDataPoint,
     ProgramStep,
     build_live_feed_message,
+    build_ping_message,
     build_start_cook_message,
     build_start_key_exchange_message,
     build_stop_cook_message,
@@ -252,13 +253,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The Joule uses its own key exchange (NOT OS-level BLE pairing).
         The user must press the button on top of the Joule within 60 seconds.
 
-        Since we cannot reliably get the 8-byte circulator address from BLE
-        manufacturer data (HA scanner returns empty), this method tries
-        multiple address constructions derived from the MAC.  Messages use
-        the SDK-minimal format: only recipientAddress + StartKeyExchangeRequest
-        (no handle, no end, no senderAddress — matching how the SDK builds
-        StreamMessages).  The full format (with sender/handle/end) is also
-        tried for the most likely address.
+        Sends a Ping first to verify the BLE write path is functional, then
+        tries key exchange with multiple address variants.  Each variant is
+        written three ways: response=True to 4322, response=False to 4322,
+        and response=False to 4326.
         """
         from homeassistant.components.persistent_notification import (
             async_create,
@@ -271,27 +269,19 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         mac_bytes = mac_to_bytes(self.api.mac_address)  # 6 bytes MSB
-        mac_rev = mac_bytes[::-1]  # 6 bytes LSB
 
-        # Build address candidates: various 8-byte constructions from MAC
+        # Address candidates: most likely constructions from MAC
         address_candidates: list[tuple[str, bytes]] = [
-            ("MAC+0102", mac_bytes + b"\x01\x02"),
             ("MAC+0000", mac_bytes + b"\x00\x00"),
-            ("rMAC+0102", mac_rev + b"\x01\x02"),
-            ("rMAC+0000", mac_rev + b"\x00\x00"),
             ("no-addr", b""),
         ]
 
-        # If manufacturer data provided a different address, try it first
+        # If manufacturer data provided a real address, try it first
         mfr_addr = self.api.recipient_address
         is_padded_mac = mfr_addr == mac_bytes + b"\x00\x00"
         if not is_padded_mac and len(mfr_addr) == 8:
             address_candidates.insert(0, ("mfr-data", mfr_addr))
 
-        _LOGGER.warning(
-            "Starting key exchange — trying %d address variants",
-            len(address_candidates),
-        )
         async_create(
             self.hass,
             "**Press the button on top of your Joule** to complete pairing.\n\n"
@@ -301,9 +291,30 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         try:
-            # Send SDK-minimal format for each address to BOTH characteristics:
-            # - 4322 (write-with-response) — the documented write char
-            # - 4326 (write-without-response) — some devices only process WOR
+            # Step 0: Send a Ping to test the write path
+            ping_payload = build_ping_message(
+                sender=self.api.sender_address,
+                recipient=self.api.recipient_address,
+            )
+            _LOGGER.warning(
+                "PING (%d bytes): %s", len(ping_payload), ping_payload.hex(),
+            )
+            try:
+                async with asyncio.timeout(5):
+                    await self.api.write_message_no_response(ping_payload)
+                _LOGGER.warning("Ping write OK (response=False)")
+            except (TimeoutError, JouleBLEError) as err:
+                _LOGGER.warning("Ping write FAIL: %s", err)
+
+            # Step 1: Send key exchange with each address variant
+            # Each variant is written three ways to maximize coverage:
+            # a) 4322 response=True  (ATT Write Request)
+            # b) 4322 response=False (ATT Write Command)
+            # c) 4326 response=False (write-without-response char)
+            _LOGGER.warning(
+                "Starting key exchange — %d address variants × 3 write modes",
+                len(address_candidates),
+            )
             for label, addr in address_candidates:
                 sdk_payload = b""
                 if addr:
@@ -316,55 +327,59 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     label, len(sdk_payload), sdk_payload.hex(),
                 )
                 self._notification_received.clear()
-                # Write to 4322 (write-with-response)
+                # a) Write to 4322 response=True
                 try:
                     async with asyncio.timeout(5):
                         await self.api.write_message(sdk_payload)
-                    _LOGGER.warning("Write 4322 OK: %s", label)
+                    _LOGGER.warning("4322-WR OK: %s", label)
                 except (TimeoutError, JouleBLEError) as err:
-                    _LOGGER.warning("Write 4322 FAIL %s: %s", label, err)
-                # Write same payload to 4326 (write-without-response)
+                    _LOGGER.warning("4322-WR FAIL %s: %s", label, err)
+                # b) Write to 4322 response=False
+                try:
+                    async with asyncio.timeout(5):
+                        await self.api.write_message_no_response(sdk_payload)
+                    _LOGGER.warning("4322-WC OK: %s", label)
+                except (TimeoutError, JouleBLEError) as err:
+                    _LOGGER.warning("4322-WC FAIL %s: %s", label, err)
+                # c) Write to 4326 response=False
                 try:
                     async with asyncio.timeout(5):
                         await self.api.write_to_file_char(sdk_payload)
-                    _LOGGER.warning("Write 4326 OK: %s", label)
+                    _LOGGER.warning("4326-WC OK: %s", label)
                 except (TimeoutError, JouleBLEError) as err:
-                    _LOGGER.warning("Write 4326 FAIL %s: %s", label, err)
+                    _LOGGER.warning("4326-WC FAIL %s: %s", label, err)
 
-            # Also try full format (with sender/handle/end) for MAC+0102
+            # Step 2: Full-format message (with handle/end/sender)
             full_payload = build_start_key_exchange_message(
                 sender=self.api.sender_address,
-                recipient=mac_bytes + b"\x01\x02",
+                recipient=mac_bytes + b"\x00\x00",
             )
             _LOGGER.warning(
-                "KEY EXCHANGE full-fmt MAC+0102 (%d bytes): %s",
+                "KEY EXCHANGE full-fmt (%d bytes): %s",
                 len(full_payload), full_payload.hex(),
             )
             self._notification_received.clear()
             try:
                 async with asyncio.timeout(5):
-                    await self.api.write_message(full_payload)
-                _LOGGER.warning("Write OK: full-fmt MAC+0102")
+                    await self.api.write_message_no_response(full_payload)
+                _LOGGER.warning("Write OK: full-fmt (response=False)")
             except (TimeoutError, JouleBLEError) as err:
-                _LOGGER.warning("Write FAIL full-fmt MAC+0102: %s", err)
+                _LOGGER.warning("Write FAIL full-fmt: %s", err)
 
-            # Wait the full timeout for any response
+            # Step 3: Wait for any response
             _LOGGER.warning(
                 "All variants sent — waiting %.0fs for response "
                 "(PRESS JOULE BUTTON NOW!)",
                 self.KEY_EXCHANGE_TIMEOUT,
             )
-            # Re-send the most likely candidate and wait
-            best_payload = b""
-            best_addr = mac_bytes + b"\x01\x02"
-            best_payload += encode_field_bytes(6, best_addr)
-            best_payload += encode_field_bytes(
+            best_payload = encode_field_bytes(
                 FIELD_START_KEY_EXCHANGE_REQUEST, b""
             )
             got_reply = await self._try_write_and_wait(
                 "KeyExchange-wait",
                 best_payload,
                 self.KEY_EXCHANGE_TIMEOUT,
+                no_response=True,
             )
 
             if got_reply and self._auth_key is not None:
@@ -433,11 +448,19 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._subscribed = True
                 _LOGGER.warning("Subscribed to 4325 notifications")
 
-                # Verify CCCD was actually written — v0.9.6 showed it was
-                # 0x0000 before subscribe; if start_notify() didn't enable
-                # it, we manually write it
+                # Verify CCCD was actually written
                 cccd_ok = await self.api.verify_and_enable_notifications()
                 _LOGGER.warning("CCCD verification: %s", "OK" if cccd_ok else "FAILED")
+
+                # Read 4323 to clear any stale buffer — the official app
+                # always reads 4323 on notification; if the device waits for
+                # us to consume stale data before accepting commands, this
+                # unblocks it.
+                stale = await self.api.read_characteristic(READ_CHAR_UUID)
+                _LOGGER.warning(
+                    "Initial 4323 read (clear buffer): %s",
+                    stale.hex() if stale else "empty",
+                )
 
             # Step 2: Authenticate if needed
             if not self._authenticated:
