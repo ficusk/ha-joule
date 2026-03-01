@@ -374,23 +374,40 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _submit_key(self, key: bytes) -> bool:
         """Submit a secret key to authenticate with the Joule.
 
+        Tries empty addresses first (matching the iOS app capture), then
+        falls back to full addresses if no response.
+
         Returns True if the device accepted the key.
         """
         _LOGGER.warning("Submitting auth key: %s", key.hex())
-        payload = build_submit_key_message(
+
+        # Variant 1: empty addresses (matches iOS app exactly — 26 bytes)
+        payload_empty = build_submit_key_message(
+            secret_key=key,
+            sender=b"",
+            recipient=b"",
+        )
+        got_reply = await self._try_write_and_wait(
+            "SubmitKey-empty-addrs", payload_empty, self.NOTIFICATION_TIMEOUT,
+        )
+        if got_reply and self._authenticated:
+            _LOGGER.warning("Authentication successful (empty addrs)!")
+            return True
+
+        # Variant 2: full addresses (original behavior — 42 bytes, Long Write)
+        payload_full = build_submit_key_message(
             secret_key=key,
             sender=self.api.sender_address,
             recipient=self.api.recipient_address,
         )
         got_reply = await self._try_write_and_wait(
-            "SubmitKeyRequest", payload, self.NOTIFICATION_TIMEOUT,
+            "SubmitKey-full-addrs", payload_full, self.NOTIFICATION_TIMEOUT,
         )
-
         if got_reply and self._authenticated:
-            _LOGGER.warning("Authentication successful!")
+            _LOGGER.warning("Authentication successful (full addrs)!")
             return True
 
-        _LOGGER.warning("SubmitKeyRequest failed or rejected")
+        _LOGGER.warning("SubmitKeyRequest failed — no variant got a response")
         return False
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -428,6 +445,11 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Service Changed indications: %s",
                     "enabled" if sc_ok else "not available",
                 )
+
+                # Brief delay after Service Changed to let firmware process
+                # the indication registration before we send commands
+                if sc_ok:
+                    await asyncio.sleep(0.5)
 
                 await self.api.subscribe(self._on_notification)
                 self._subscribed = True

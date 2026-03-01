@@ -305,10 +305,48 @@ class JouleBLEAPI:
                         await self._client.start_notify(
                             char, lambda _c, _d: None,
                         )
+                        # Verify CCCD value — must be 0x0200 (indications),
+                        # not 0x0100 (notifications)
+                        cccd_uuid = "00002902-0000-1000-8000-00805f9b34fb"
+                        for desc in char.descriptors:
+                            if desc.uuid == cccd_uuid:
+                                try:
+                                    val = bytes(
+                                        await self._client.read_gatt_descriptor(
+                                            desc.handle
+                                        )
+                                    )
+                                    _LOGGER.warning(
+                                        "0x2A05 CCCD (handle %d) = %s (%s)",
+                                        desc.handle,
+                                        val.hex(),
+                                        "indications"
+                                        if val == b"\x02\x00"
+                                        else "notifications"
+                                        if val == b"\x01\x00"
+                                        else "unknown",
+                                    )
+                                    # If start_notify wrote 0x0100 instead of
+                                    # 0x0200, force-write the correct value
+                                    if val == b"\x01\x00":
+                                        _LOGGER.warning(
+                                            "Fixing: writing 0x0200 "
+                                            "(indications) to CCCD"
+                                        )
+                                        await self._client.write_gatt_descriptor(
+                                            desc.handle, b"\x02\x00"
+                                        )
+                                except BleakError as verr:
+                                    _LOGGER.warning(
+                                        "CCCD read/fix on 0x2A05 failed: %s",
+                                        verr,
+                                    )
+                                break
                         _LOGGER.warning(
                             "Service Changed indications enabled via "
-                            "start_notify (uuid=%s)",
+                            "start_notify (uuid=%s, props=%s)",
                             char.uuid,
+                            char.properties,
                         )
                         return True
                     except BleakError as err:
