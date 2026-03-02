@@ -13,7 +13,7 @@
  *   entity_unit:         select.joule_sous_vide_temperature_unit
  */
 
-const CARD_VERSION = "0.7.0";
+const CARD_VERSION = "0.7.1";
 console.info(
   `%c JOULE-SOUS-VIDE-CARD %c v${CARD_VERSION} `,
   "color: white; background: #03a9f4; font-weight: bold; padding: 2px 6px; border-radius: 3px 0 0 3px;",
@@ -132,12 +132,18 @@ class JouleSousVideCard extends HTMLElement {
       ? "°F"
       : unitState.state;
 
-    // Convert current temperature for display in selected unit
+    // Convert current temperature only if the sensor's unit differs from
+    // the selected display unit.  HA auto-converts sensor states when the
+    // user's unit system is imperial, so the state may already be in °F.
+    const sensorUnit =
+      (currentTempState && currentTempState.attributes.unit_of_measurement) || "°C";
     const currentTempDisplay = unavailable
       ? "–"
-      : unit === "°F"
-      ? ((parseFloat(currentTempState.state) * 9) / 5 + 32).toFixed(1)
-      : currentTemp;
+      : sensorUnit === unit
+        ? parseFloat(currentTempState.state).toFixed(1)
+        : unit === "°F"
+          ? ((parseFloat(currentTempState.state) * 9) / 5 + 32).toFixed(1)
+          : (((parseFloat(currentTempState.state) - 32) * 5) / 9).toFixed(1);
 
     const targetMin = unavailable
       ? 32
