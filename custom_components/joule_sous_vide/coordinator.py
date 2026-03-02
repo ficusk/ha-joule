@@ -70,7 +70,6 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._subscribed: bool = False
         self._authenticated: bool = False
         self._start_program_reply_received: bool = False
-        self._session_handle: int = self._new_session_handle()
         # Load persisted auth key from config entry options (if previously paired)
         stored_key = entry.options.get(CONF_BLE_AUTH_KEY)
         self._auth_key: bytes | None = (
@@ -85,12 +84,16 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     @staticmethod
-    def _new_session_handle() -> int:
-        """Generate a random session handle (matches [redacted] SDK behavior).
+    def _new_handle() -> int:
+        """Generate a random handle for a single outgoing message.
 
-        The SDK creates one handle per session and reuses it for all messages.
-        The Joule tracks per-handle sessions — commands like StartProgramRequest
-        must arrive on the same handle that was authenticated.
+        iOS PacketLogger capture (v0.16.0) revealed the official app uses a
+        DIFFERENT random handle for each outgoing StreamMessage.  The handle
+        is a correlation ID — the device echoes it back in the reply so the
+        sender can match responses to requests.  Reusing a single handle for
+        all messages (our v0.9.0–v0.15.0 approach) caused the Joule to
+        silently ignore cook commands, likely because the firmware uses the
+        handle to route messages internally.
         """
         return random.randint(1, 2**31 - 1)
 
@@ -339,7 +342,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # All required fields present; addresses are zero-length bytes.
             # Session handle + no end field (matches iOS app capture).
             msg_empty = StreamMessage(
-                handle=self._session_handle,
+                handle=self._new_handle(),
                 sender_address=b"",
                 recipient_address=b"",
                 start_key_exchange_request=StartKeyExchangeRequest(),
@@ -354,7 +357,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # --- Variant B: empty sender + 6-byte MAC recipient ---
             msg_mac6 = StreamMessage(
-                handle=self._session_handle,
+                handle=self._new_handle(),
                 sender_address=b"",
                 recipient_address=mac_6,
                 start_key_exchange_request=StartKeyExchangeRequest(),
@@ -370,7 +373,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             full_payload = build_start_key_exchange_message(
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
-                handle=self._session_handle,
+                handle=self._new_handle(),
             )
             _LOGGER.warning(
                 "KE-full (%d bytes, MTU payload=%d): %s",
@@ -419,7 +422,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             secret_key=key,
             sender=b"",
             recipient=b"",
-            handle=self._session_handle,
+            handle=self._new_handle(),
         )
         got_reply = await self._try_write_and_wait(
             "SubmitKey-empty-addrs", payload_empty, self.NOTIFICATION_TIMEOUT,
@@ -433,7 +436,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             secret_key=key,
             sender=self.api.sender_address,
             recipient=self.api.recipient_address,
-            handle=self._session_handle,
+            handle=self._new_handle(),
         )
         got_reply = await self._try_write_and_wait(
             "SubmitKey-full-addrs", payload_full, self.NOTIFICATION_TIMEOUT,
@@ -467,11 +470,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             reconnected = await self.api.ensure_connected()
             if reconnected:
-                self._session_handle = self._new_session_handle()
-                _LOGGER.warning(
-                    "Fresh BLE connection — new session handle=%08x",
-                    self._session_handle,
-                )
+                _LOGGER.warning("Fresh BLE connection — resetting state")
                 self._subscribed = False
                 self._authenticated = False
                 self._start_program_reply_received = False
@@ -541,9 +540,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Step 3: Request live data feed
             if self._authenticated:
                 payload = build_live_feed_message(
-                    sender=self.api.sender_address,
-                    recipient=self.api.recipient_address,
-                    handle=self._session_handle,
+                    sender=b"",
+                    recipient=b"",
+                    handle=self._new_handle(),
                 )
                 await self._try_write_and_wait(
                     "BeginLiveFeed", payload, self.NOTIFICATION_TIMEOUT,
@@ -599,9 +598,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 step_before = self._latest_data_point.program_step
             _LOGGER.warning(
                 "StartProgramRequest: temp=%.1f°C cook_time=%ds "
-                "feed_id=%d seq=%d handle=%08x step_before=%s",
+                "feed_id=%d seq=%d step_before=%s (per-msg handles)",
                 target_temperature, cook_time_seconds,
-                feed_id, seq_num, self._session_handle, step_before,
+                feed_id, seq_num, step_before,
             )
 
             # Reset reply flag before sending cook commands
@@ -611,7 +610,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             identify_payload = build_identify_circulator_message(
                 sender=b"",
                 recipient=b"",
-                handle=self._session_handle,
+                handle=self._new_handle(),
             )
             await self._safe_write("IdentifyCirculator", identify_payload)
             await asyncio.sleep(0.5)
@@ -621,7 +620,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 target_temperature,
                 sender=b"",
                 recipient=b"",
-                handle=self._session_handle,
+                handle=self._new_handle(),
                 feed_id=feed_id,
                 sequence_number=seq_num,
             )
@@ -657,7 +656,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cook_time_seconds,
                 sender=b"",
                 recipient=b"",
-                handle=self._session_handle,
+                handle=self._new_handle(),
                 feed_id=feed_id,
                 sequence_number=seq_num,
             )
@@ -743,7 +742,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             payload = build_stop_cook_message(
                 sender=b"",
                 recipient=b"",
-                handle=self._session_handle,
+                handle=self._new_handle(),
                 feed_id=feed_id,
                 sequence_number=seq_num,
             )
