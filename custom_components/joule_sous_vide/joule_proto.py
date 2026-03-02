@@ -187,6 +187,8 @@ class StartProgramRequest:
     """Start a cooking program."""
 
     circulator_program: CirculatorProgram  # field 1, embedded message
+    feed_id: int = 0  # field 2, uint32 — optimistic concurrency (from CirculatorDataPoint)
+    sequence_number: int = 0  # field 3, uint32 — optimistic concurrency
 
 
 @dataclass
@@ -296,7 +298,15 @@ def encode_circulator_program(program: CirculatorProgram) -> bytes:
 def encode_start_program_request(request: StartProgramRequest) -> bytes:
     """Encode a StartProgramRequest to protobuf bytes."""
     program_bytes = encode_circulator_program(request.circulator_program)
-    return encode_field_bytes(1, program_bytes)
+    result = encode_field_bytes(1, program_bytes)
+    # Optimistic concurrency: feedId and sequenceNumber from the latest
+    # CirculatorDataPoint.  The iOS app always sends these; the Joule may
+    # reject commands that don't prove the sender has current state.
+    if request.feed_id:
+        result += encode_field_varint(2, request.feed_id)
+    if request.sequence_number:
+        result += encode_field_varint(3, request.sequence_number)
+    return result
 
 
 def encode_stop_circulator_request(_request: StopCirculatorRequest) -> bytes:
@@ -490,6 +500,8 @@ def build_start_cook_message(
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
     handle: int = 0,
+    feed_id: int = 0,
+    sequence_number: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a StartProgramRequest."""
     program = CirculatorProgram(
@@ -501,7 +513,11 @@ def build_start_cook_message(
         handle=handle,
         sender_address=sender,
         recipient_address=recipient,
-        start_program_request=StartProgramRequest(circulator_program=program),
+        start_program_request=StartProgramRequest(
+            circulator_program=program,
+            feed_id=feed_id,
+            sequence_number=sequence_number,
+        ),
     )
     return encode_stream_message(msg)
 

@@ -33,27 +33,25 @@ def _copy_card_to_www(hass: HomeAssistant) -> None:
 
 
 def _get_lovelace_resources(hass: HomeAssistant) -> Any:
-    """Get the Lovelace resources collection, supporting old and new HA APIs."""
-    # New API (HA 2025.x+): hass.data[LOVELACE_DATA].resources
-    try:
-        from homeassistant.components.lovelace.const import LOVELACE_DATA  # type: ignore[attr-defined]
+    """Get the Lovelace resources collection.
 
-        lovelace_data = hass.data.get(LOVELACE_DATA)
-        if lovelace_data is not None:
-            resources = getattr(lovelace_data, "resources", None)
-            if resources is not None:
-                return resources
-    except ImportError:
-        pass
+    Uses attribute access on the LovelaceData dataclass (required since HA
+    2025.2 — dict-style access is deprecated and breaks in 2026.2).
 
-    # Old API (HA 2024.x): hass.data["lovelace"]["resources"]
-    try:
-        resources = hass.data["lovelace"]["resources"]
-        if resources is not None:
-            return resources
-    except (KeyError, TypeError):
-        pass
-
+    With ``lovelace`` declared in ``manifest.json`` ``dependencies``, HA
+    guarantees the lovelace component's ``async_setup()`` has completed and
+    ``hass.data["lovelace"]`` is populated before our ``async_setup()`` runs.
+    """
+    lovelace_data = hass.data.get("lovelace")
+    if lovelace_data is None:
+        return None
+    # Attribute access — LovelaceData is a dataclass with a .resources field
+    resources = getattr(lovelace_data, "resources", None)
+    if resources is not None:
+        return resources
+    # Fallback for very old HA where lovelace_data was a plain dict
+    if isinstance(lovelace_data, dict):
+        return lovelace_data.get("resources")
     return None
 
 
@@ -61,12 +59,26 @@ async def _register_lovelace_resource(hass: HomeAssistant) -> bool:
     """Add the card JS as a Lovelace resource if not already present.
 
     Returns True if the resource is registered (or was already present).
+    Only works in storage mode (the HAOS default). In YAML mode, users must
+    add the resource manually.
     """
+    # Check resource mode — auto-registration only works in storage mode
+    lovelace_data = hass.data.get("lovelace")
+    if lovelace_data is not None:
+        mode = getattr(lovelace_data, "resource_mode", None)
+        if mode == "yaml":
+            _LOGGER.info(
+                "Lovelace is in YAML mode — add the card resource manually: "
+                "url: %s, type: module",
+                LOVELACE_LOCAL_URL,
+            )
+            return False
+
     resources = _get_lovelace_resources(hass)
     if resources is None:
         _LOGGER.warning(
             "Lovelace resources not available — "
-            "lovelace component may not be loaded yet or is in YAML mode"
+            "lovelace component may not be loaded yet"
         )
         return False
 

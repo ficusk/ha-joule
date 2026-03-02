@@ -561,6 +561,20 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self.api.ensure_connected()
             cook_time_seconds = int(cook_time_minutes * 60)
+
+            # Optimistic concurrency: include feedId and sequenceNumber from
+            # the latest CirculatorDataPoint.  The iOS app always sends these;
+            # the Joule rejects commands without proof of current state.
+            feed_id = 0
+            seq_num = 0
+            if self._latest_data_point is not None:
+                feed_id = self._latest_data_point.feed_id
+                seq_num = self._latest_data_point.sequence_number
+                _LOGGER.warning(
+                    "Using optimistic concurrency: feed_id=%d seq=%d",
+                    feed_id, seq_num,
+                )
+
             # Try empty addresses first (matches SubmitKeyRequest pattern
             # that works), then full addresses as fallback.
             payload_empty = build_start_cook_message(
@@ -569,6 +583,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sender=b"",
                 recipient=b"",
                 handle=self._session_handle,
+                feed_id=feed_id,
+                sequence_number=seq_num,
             )
             _LOGGER.warning(
                 "StartProgramRequest empty-addrs (%d bytes): %s",
@@ -582,6 +598,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sender=self.api.sender_address,
                 recipient=self.api.recipient_address,
                 handle=self._session_handle,
+                feed_id=feed_id,
+                sequence_number=seq_num,
             )
             _LOGGER.warning(
                 "StartProgramRequest full-addrs (%d bytes): %s",
