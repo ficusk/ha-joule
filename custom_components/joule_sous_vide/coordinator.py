@@ -735,26 +735,26 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_refresh()
 
     async def async_stop_cooking(self) -> None:
-        """Send a protobuf StopCirculatorRequest to the device."""
+        """Send a protobuf StopCirculatorRequest to the device.
+
+        Sends an empty-body StopCirculatorRequest (no feedId/sequenceNumber).
+        The iOS app sends these optional optimistic-concurrency fields, but at
+        MTU=23 including them can push the message over the 20-byte ATT payload
+        limit, forcing a Long Write.  Omitting them keeps the message at 12
+        bytes (single Write Request) and avoids CS_ERROR_INVALID_STATE (result=8)
+        from the firmware's concurrency check.
+        """
         try:
             await self.api.ensure_connected()
 
-            feed_id = 0
-            seq_num = 0
-            if self._latest_data_point is not None:
-                feed_id = self._latest_data_point.feed_id
-                seq_num = self._latest_data_point.sequence_number
-            _LOGGER.warning(
-                "StopCirculatorRequest: feed_id=%d seq=%d",
-                feed_id, seq_num,
-            )
+            _LOGGER.warning("StopCirculatorRequest: empty body (no concurrency fields)")
 
             payload = build_stop_cook_message(
                 sender=b"",
                 recipient=b"",
                 handle=self._new_handle(),
-                feed_id=feed_id,
-                sequence_number=seq_num,
+                feed_id=0,
+                sequence_number=0,
             )
             await self._try_write_and_wait(
                 "StopCirculator", payload, 5.0,
