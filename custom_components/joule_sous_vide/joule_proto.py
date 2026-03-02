@@ -38,7 +38,9 @@ FIELD_START_KEY_EXCHANGE_REQUEST = 120
 FIELD_START_KEY_EXCHANGE_REPLY = 121
 FIELD_SUBMIT_KEY_REQUEST = 130
 FIELD_SUBMIT_KEY_REPLY = 131
+FIELD_START_PROGRAM_REPLY = 51
 FIELD_IDENTIFY_CIRCULATOR_REQUEST = 152
+FIELD_IDENTIFY_CIRCULATOR_REPLY = 153
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +252,20 @@ class IdentifyCirculatorRequest:
 
 
 @dataclass
+class StartProgramReply:
+    """Device response to a StartProgramRequest."""
+
+    result: int = 0  # field 1, enum Result
+
+
+@dataclass
+class IdentifyCirculatorReply:
+    """Device response to an IdentifyCirculatorRequest."""
+
+    result: int = 0  # field 1, enum Result (0 = success)
+
+
+@dataclass
 class BeginLiveFeedRequest:
     """Request a live data feed from the device."""
 
@@ -281,6 +297,7 @@ class StreamMessage:
     ping: Ping | None = None  # field 18
     pong: Pong | None = None  # field 19
     start_program_request: StartProgramRequest | None = None  # field 50
+    start_program_reply: StartProgramReply | None = None  # field 51
     stop_circulator_request: StopCirculatorRequest | None = None  # field 60
     begin_live_feed_request: BeginLiveFeedRequest | None = None  # field 70
     circulator_data_point: CirculatorDataPoint | None = None  # field 90
@@ -289,6 +306,7 @@ class StreamMessage:
     submit_key_request: SubmitKeyRequest | None = None  # field 130
     submit_key_reply: SubmitKeyReply | None = None  # field 131
     identify_circulator_request: IdentifyCirculatorRequest | None = None  # field 152
+    identify_circulator_reply: IdentifyCirculatorReply | None = None  # field 153
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +431,7 @@ def encode_stream_message(message: StreamMessage) -> bytes:
 def decode_circulator_data_point(data: bytes) -> CirculatorDataPoint:
     """Decode a CirculatorDataPoint from raw protobuf bytes."""
     point = CirculatorDataPoint()
+    unknown_fields: list[str] = []
     for field_number, wire_type, value in decode_fields(data):
         if field_number == 1 and wire_type == WIRETYPE_VARINT:
             point.feed_id = value
@@ -428,7 +447,24 @@ def decode_circulator_data_point(data: bytes) -> CirculatorDataPoint:
             point.program_step = ProgramStep(value)
         elif field_number == 12 and wire_type == WIRETYPE_VARINT:
             point.time_remaining = value
-        # Unknown fields are silently ignored
+        else:
+            # Log unknown fields for diagnostics — the 98-byte responses have
+            # fields beyond what [redacted] documents (50-61 range observed)
+            if wire_type == WIRETYPE_VARINT:
+                unknown_fields.append(f"f{field_number}:v={value}")
+            elif wire_type == WIRETYPE_FIXED32:
+                float_val = struct.unpack("<f", value)[0]
+                unknown_fields.append(
+                    f"f{field_number}:f32={float_val:.4f}({value.hex()})"
+                )
+            elif wire_type == WIRETYPE_FIXED64:
+                unknown_fields.append(f"f{field_number}:f64={value.hex()}")
+            elif wire_type == WIRETYPE_LENGTH_DELIMITED:
+                unknown_fields.append(f"f{field_number}:bytes={value.hex()}")
+    if unknown_fields:
+        _LOGGER.debug(
+            "CirculatorDataPoint unknown fields: %s", ", ".join(unknown_fields),
+        )
     return point
 
 
@@ -449,6 +485,15 @@ def decode_stream_message(data: bytes) -> StreamMessage:
             and wire_type == WIRETYPE_LENGTH_DELIMITED
         ):
             message.pong = Pong()
+        elif (
+            field_number == FIELD_START_PROGRAM_REPLY
+            and wire_type == WIRETYPE_LENGTH_DELIMITED
+        ):
+            reply = StartProgramReply()
+            for fn, wt, val in decode_fields(value):
+                if fn == 1 and wt == WIRETYPE_VARINT:
+                    reply.result = val
+            message.start_program_reply = reply
         elif (
             field_number == FIELD_CIRCULATOR_DATA_POINT
             and wire_type == WIRETYPE_LENGTH_DELIMITED
@@ -474,6 +519,15 @@ def decode_stream_message(data: bytes) -> StreamMessage:
                 if fn == 1 and wt == WIRETYPE_VARINT:
                     reply.result = val
             message.submit_key_reply = reply
+        elif (
+            field_number == FIELD_IDENTIFY_CIRCULATOR_REPLY
+            and wire_type == WIRETYPE_LENGTH_DELIMITED
+        ):
+            reply = IdentifyCirculatorReply()
+            for fn, wt, val in decode_fields(value):
+                if fn == 1 and wt == WIRETYPE_VARINT:
+                    reply.result = val
+            message.identify_circulator_reply = reply
         # Other oneof fields are silently ignored
     return message
 

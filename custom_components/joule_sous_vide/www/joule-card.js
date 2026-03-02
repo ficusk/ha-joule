@@ -12,7 +12,7 @@
  *   entity_unit:         select.joule_temperature_unit
  */
 
-const CARD_VERSION = "0.5.0";
+const CARD_VERSION = "0.6.0";
 console.info(
   `%c JOULE-SOUS-VIDE-CARD %c v${CARD_VERSION} `,
   "color: white; background: #03a9f4; font-weight: bold; padding: 2px 6px; border-radius: 3px 0 0 3px;",
@@ -28,18 +28,6 @@ class JouleSousVideCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (
-      !config.entity_switch ||
-      !config.entity_current_temp ||
-      !config.entity_target_temp ||
-      !config.entity_cook_time ||
-      !config.entity_unit
-    ) {
-      throw new Error(
-        "joule-sous-vide-card requires: entity_switch, entity_current_temp, " +
-          "entity_target_temp, entity_cook_time, entity_unit"
-      );
-    }
     this._config = config;
     if (!this.shadowRoot) {
       this.attachShadow({ mode: "open" });
@@ -57,6 +45,38 @@ class JouleSousVideCard extends HTMLElement {
 
     const hass = this._hass;
     const cfg = this._config;
+
+    // Show setup message when required entity fields are not yet configured
+    // (HA's card editor calls setConfig with partial config initially)
+    if (
+      !cfg.entity_switch ||
+      !cfg.entity_current_temp ||
+      !cfg.entity_target_temp ||
+      !cfg.entity_cook_time ||
+      !cfg.entity_unit
+    ) {
+      this.shadowRoot.innerHTML = `
+        <div style="
+          padding: 16px;
+          font-family: var(--paper-font-body1_-_font-family, sans-serif);
+          color: var(--primary-text-color, #212121);
+          background: var(--ha-card-background, var(--card-background-color, white));
+          border-radius: var(--ha-card-border-radius, 12px);
+          box-shadow: var(--ha-card-box-shadow, 0 2px 4px rgba(0,0,0,.14));
+        ">
+          <div style="font-size: 16px; font-weight: 500; margin-bottom: 8px;">
+            Joule Sous Vide
+          </div>
+          <div style="font-size: 13px; color: var(--secondary-text-color, #727272);">
+            Add the required entity fields in the card YAML editor:<br>
+            <code>entity_switch</code>, <code>entity_current_temp</code>,
+            <code>entity_target_temp</code>, <code>entity_cook_time</code>,
+            <code>entity_unit</code>
+          </div>
+        </div>
+      `;
+      return;
+    }
 
     const switchState = hass.states[cfg.entity_switch];
     const currentTempState = hass.states[cfg.entity_current_temp];

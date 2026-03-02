@@ -35,6 +35,8 @@ from .joule_proto import (
     build_stop_cook_message,
     build_submit_key_message,
     decode_stream_message,
+    FIELD_START_PROGRAM_REPLY,
+    FIELD_IDENTIFY_CIRCULATOR_REPLY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,6 +69,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._notification_received: asyncio.Event = asyncio.Event()
         self._subscribed: bool = False
         self._authenticated: bool = False
+        self._start_program_reply_received: bool = False
         self._session_handle: int = self._new_session_handle()
         # Load persisted auth key from config entry options (if previously paired)
         stored_key = entry.options.get(CONF_BLE_AUTH_KEY)
@@ -150,14 +153,30 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._authenticated = True
                 self._notification_received.set()
+            elif msg.start_program_reply is not None:
+                _LOGGER.warning(
+                    "Got StartProgramReply from %s! result=%d",
+                    source, msg.start_program_reply.result,
+                )
+                self._start_program_reply_received = True
+                self._notification_received.set()
+            elif msg.identify_circulator_reply is not None:
+                _LOGGER.warning(
+                    "Got IdentifyCirculatorReply from %s! result=%d",
+                    source, msg.identify_circulator_reply.result,
+                )
+                self._notification_received.set()
             elif msg.pong is not None:
                 _LOGGER.warning("Got PONG from %s!", source)
                 self._notification_received.set()
             elif msg.circulator_data_point is not None:
                 dp = msg.circulator_data_point
                 _LOGGER.warning(
-                    "CirculatorDataPoint from %s: bath_temp=%.2f, step=%s",
+                    "CirculatorDataPoint from %s: bath_temp=%.2f step=%s "
+                    "feed=%d seq=%d ts=%d err=%s remain=%d",
                     source, dp.bath_temp, dp.program_step,
+                    dp.feed_id, dp.sequence_number, dp.timestamp,
+                    dp.error_state, dp.time_remaining,
                 )
                 self._latest_data_point = dp
                 self._notification_received.set()
@@ -455,6 +474,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._subscribed = False
                 self._authenticated = False
+                self._start_program_reply_received = False
 
             # Step 1: Subscribe to notifications on 4325
             if not self._subscribed:
@@ -559,18 +579,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Send a protobuf StartProgramRequest to the device.
 
-        At MTU=23 (20-byte ATT payload), messages >20 bytes require the BLE
-        Long Write procedure.  Auth messages (~24 bytes, 2 Long Write chunks)
-        work fine.  The full iOS-matching cook message is 68 bytes (4 chunks)
-        and has never worked — BlueZ may handle 4-chunk Long Writes differently
-        from CoreBluetooth.
-
-        Strategy:
-          1. Send IdentifyCirculatorRequest (12 bytes, single ATT write) —
-             the iOS app sends this before cook commands
-          2. Try a compact cook message (~21–30 bytes, ≤2 Long Write chunks)
-             matching the [redacted] SDK structure
-          3. Fall back to the full 68-byte iOS-matching message
+        Sends both compact (~30 byte) and full (68 byte) cook messages.
+        After each, checks for a real StartProgramReply (field 51) or a
+        program_step change in CirculatorDataPoint — NOT just "any notification"
+        (the live feed streams data every ~1s regardless of commands sent).
         """
         self._target_temperature = target_temperature
         self._cook_time_minutes = cook_time_minutes
@@ -580,15 +592,20 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             feed_id = 0
             seq_num = 0
+            step_before = ProgramStep.UNKNOWN
             if self._latest_data_point is not None:
                 feed_id = self._latest_data_point.feed_id
                 seq_num = self._latest_data_point.sequence_number
+                step_before = self._latest_data_point.program_step
             _LOGGER.warning(
                 "StartProgramRequest: temp=%.1f°C cook_time=%ds "
-                "feed_id=%d seq=%d handle=%08x",
+                "feed_id=%d seq=%d handle=%08x step_before=%s",
                 target_temperature, cook_time_seconds,
-                feed_id, seq_num, self._session_handle,
+                feed_id, seq_num, self._session_handle, step_before,
             )
+
+            # Reset reply flag before sending cook commands
+            self._start_program_reply_received = False
 
             # Pre-cook: IdentifyCirculatorRequest (iOS does this before cook)
             identify_payload = build_identify_circulator_message(
@@ -596,15 +613,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 recipient=b"",
                 handle=self._session_handle,
             )
-            _LOGGER.warning(
-                "Pre-cook IdentifyCirculatorRequest (%d bytes): %s",
-                len(identify_payload), identify_payload.hex(),
-            )
             await self._safe_write("IdentifyCirculator", identify_payload)
             await asyncio.sleep(0.5)
 
-            # Attempt 1: compact message (~21–30 bytes, ≤2 Long Write chunks)
-            # Omits ProgramMetadata + field 7 that aren't in [redacted] SDK.
+            # Attempt 1: compact message (~21–30 bytes)
             compact_payload = build_compact_start_cook_message(
                 target_temperature,
                 sender=b"",
@@ -613,24 +625,33 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 feed_id=feed_id,
                 sequence_number=seq_num,
             )
-            _LOGGER.warning(
-                "Compact StartProgramRequest (%d bytes): %s",
-                len(compact_payload), compact_payload.hex(),
-            )
-            got_reply = await self._try_write_and_wait(
+            await self._try_write_and_wait(
                 "StartProgram-compact", compact_payload, 5.0,
             )
-            if got_reply:
+
+            # Check for real response (StartProgramReply or step change)
+            if self._start_program_reply_received:
                 _LOGGER.warning(
-                    "Compact cook message got a response! "
-                    "Long Write 4-chunk theory confirmed."
+                    "Compact cook: got StartProgramReply! Cook accepted."
+                )
+            elif (
+                self._latest_data_point is not None
+                and self._latest_data_point.program_step != step_before
+                and self._latest_data_point.program_step != ProgramStep.UNKNOWN
+            ):
+                _LOGGER.warning(
+                    "Compact cook: program_step changed %s → %s! Cook accepted.",
+                    step_before, self._latest_data_point.program_step,
                 )
             else:
                 _LOGGER.warning(
-                    "No response to compact cook — trying full 68-byte message"
+                    "Compact cook: no StartProgramReply, step still %s "
+                    "— trying full message",
+                    self._latest_data_point.program_step
+                    if self._latest_data_point else "unknown",
                 )
 
-            # Attempt 2: full iOS-matching message (68 bytes, 4 Long Write chunks)
+            # Attempt 2: full iOS-matching message (68 bytes)
             full_payload = build_start_cook_message(
                 target_temperature,
                 cook_time_seconds,
@@ -640,15 +661,31 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 feed_id=feed_id,
                 sequence_number=seq_num,
             )
-            _LOGGER.warning(
-                "Full StartProgramRequest (%d bytes): %s",
-                len(full_payload), full_payload.hex(),
-            )
-            got_reply = await self._try_write_and_wait(
+            await self._try_write_and_wait(
                 "StartProgram-full", full_payload, 5.0,
             )
-            if got_reply:
-                _LOGGER.warning("Full cook message got a response!")
+
+            # Final check
+            if self._start_program_reply_received:
+                _LOGGER.warning(
+                    "Full cook: got StartProgramReply! Cook accepted."
+                )
+            elif (
+                self._latest_data_point is not None
+                and self._latest_data_point.program_step != step_before
+                and self._latest_data_point.program_step != ProgramStep.UNKNOWN
+            ):
+                _LOGGER.warning(
+                    "Full cook: program_step changed %s → %s! Cook accepted.",
+                    step_before, self._latest_data_point.program_step,
+                )
+            else:
+                _LOGGER.warning(
+                    "Both cook messages sent — NO StartProgramReply received, "
+                    "program_step still %s. Joule may have ignored the commands.",
+                    self._latest_data_point.program_step
+                    if self._latest_data_point else "unknown",
+                )
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
 

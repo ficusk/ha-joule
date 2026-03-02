@@ -18,6 +18,9 @@ from custom_components.joule_sous_vide.joule_proto import (
     encode_field_varint,
     encode_tag,
     encode_varint,
+    # Field numbers
+    FIELD_START_PROGRAM_REPLY,
+    FIELD_IDENTIFY_CIRCULATOR_REPLY,
     # Enums
     ErrorState,
     ProgramStep,
@@ -26,6 +29,8 @@ from custom_components.joule_sous_vide.joule_proto import (
     BeginLiveFeedRequest,
     CirculatorDataPoint,
     CirculatorProgram,
+    IdentifyCirculatorReply,
+    StartProgramReply,
     StartProgramRequest,
     StopCirculatorRequest,
     StreamMessage,
@@ -419,12 +424,36 @@ class TestStreamMessageDecode:
         assert msg.circulator_data_point.program_step == ProgramStep.COOK
         assert msg.sender_address == b"\x01" * 6
 
+    def test_identify_circulator_reply_decoded(self):
+        """Field 153 (IdentifyCirculatorReply) is decoded."""
+        # result = 0 (success) encoded as varint field 1
+        inner = encode_field_varint(1, 0)
+        data = (
+            encode_field_fixed32(1, 42)
+            + encode_field_bytes(153, inner)
+        )
+        msg = decode_stream_message(data)
+        assert msg.identify_circulator_reply is not None
+        assert msg.identify_circulator_reply.result == 0
+        assert msg.circulator_data_point is None
+
+    def test_start_program_reply_decoded(self):
+        """Field 51 (StartProgramReply) is decoded."""
+        inner = encode_field_varint(1, 0)
+        data = (
+            encode_field_fixed32(1, 42)
+            + encode_field_bytes(51, inner)
+        )
+        msg = decode_stream_message(data)
+        assert msg.start_program_reply is not None
+        assert msg.start_program_reply.result == 0
+
     def test_unknown_contents_ignored(self):
         """Unknown oneof fields do not cause errors."""
-        # Field 153 (IdentifyCirculatorReply) — not modelled
+        # Field 200 — truly unknown
         data = (
             encode_field_fixed32(1, 0)
-            + encode_field_bytes(153, b"\x0a\x05Joule")
+            + encode_field_bytes(200, b"\x0a\x05Joule")
         )
         msg = decode_stream_message(data)
         assert msg.circulator_data_point is None
@@ -597,7 +626,8 @@ class TestParseNotification:
 
     def test_with_non_data_point(self):
         """parse_notification returns None for messages without data point."""
-        data = encode_field_fixed32(1, 0) + encode_field_bytes(153, b"\x0a\x05Joule")
+        # Field 200 — unknown type, no data point
+        data = encode_field_fixed32(1, 0) + encode_field_bytes(200, b"\x0a\x05test")
         result = parse_notification(data)
         assert result is None
 
