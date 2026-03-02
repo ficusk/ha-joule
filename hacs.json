@@ -2,6 +2,5 @@
   "name": "ChefSteps Joule Sous Vide",
   "render_readme": true,
   "homeassistant": "2024.2.0",
-  "filename": "joule-card.js",
-  "content_in_root": true
+  "filename": "joule-card.js"
 }
