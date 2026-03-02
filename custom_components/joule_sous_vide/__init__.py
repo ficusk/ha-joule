@@ -1,6 +1,7 @@
 """The Joule Sous Vide integration."""
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -19,8 +20,18 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
 
 LOVELACE_CARD_URL = f"/{DOMAIN}/joule-card.js"
-LOVELACE_LOCAL_URL = "/local/joule-sous-vide-card.js"
+_LOVELACE_LOCAL_BASE = "/local/joule-sous-vide-card.js"
 LOVELACE_CARD_PATH = Path(__file__).parent / "www" / "joule-card.js"
+
+def _get_version() -> str:
+    """Read the integration version from manifest.json."""
+    manifest = Path(__file__).parent / "manifest.json"
+    try:
+        return json.loads(manifest.read_text())["version"]
+    except Exception:  # noqa: BLE001
+        return "0"
+
+LOVELACE_LOCAL_URL = f"{_LOVELACE_LOCAL_BASE}?v={_get_version()}"
 
 
 def _copy_card_to_www(hass: HomeAssistant) -> None:
@@ -86,10 +97,20 @@ async def _register_lovelace_resource(hass: HomeAssistant) -> bool:
         if not resources.loaded:
             await resources.async_load()
 
+        # Remove stale entries (old-versioned or unversioned) and check for current
         for item in resources.async_items():
-            if item.get("url") == LOVELACE_LOCAL_URL:
+            url = item.get("url", "")
+            if url == LOVELACE_LOCAL_URL:
                 _LOGGER.debug("Lovelace resource already registered")
                 return True
+            if url == _LOVELACE_LOCAL_BASE or (
+                url.startswith(_LOVELACE_LOCAL_BASE + "?")
+                and url != LOVELACE_LOCAL_URL
+            ):
+                item_id = item.get("id")
+                if item_id:
+                    await resources.async_delete_item(item_id)
+                    _LOGGER.info("Removed stale Lovelace resource %s", url)
 
         await resources.async_create_item(
             {"res_type": "module", "url": LOVELACE_LOCAL_URL}
