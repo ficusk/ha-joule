@@ -12,8 +12,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from homeassistant.const import UnitOfTemperature
-
 from .const import (
     CONF_BLE_AUTH_KEY,
     CONF_MAC_ADDRESS,
@@ -646,8 +644,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except JouleBLEError as err:
             raise UpdateFailed(f"BLE communication failed: {err}") from err
 
-        current_temperature: float = self._bath_temp_celsius()
+        current_temperature: float = 0.0
         if self._latest_data_point is not None:
+            current_temperature = self._latest_data_point.bath_temp
+
             step = self._latest_data_point.program_step
             if step in (
                 ProgramStep.PRE_HEAT,
@@ -848,7 +848,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         A full _async_update_data() poll would read stale CirculatorDataPoint
         data (still step=UNKNOWN) and override the is_cooking flag.
         """
-        current_temp = self._bath_temp_celsius()
+        current_temp = 0.0
+        if self._latest_data_point is not None:
+            current_temp = self._latest_data_point.bath_temp
         self.async_set_updated_data({
             "current_temperature": current_temp,
             "is_cooking": self._is_cooking,
@@ -856,20 +858,6 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "cook_time_minutes": self._cook_time_minutes,
             "temperature_unit": self._temperature_unit,
         })
-
-    def _bath_temp_celsius(self) -> float:
-        """Return the latest bath temperature converted to °C.
-
-        The Joule reports bath_temp in the unit configured on the device.
-        When the integration's temperature_unit is °F we convert to °C so
-        the sensor (which declares native_unit=°C) reports a correct value.
-        """
-        if self._latest_data_point is None:
-            return 0.0
-        temp = self._latest_data_point.bath_temp
-        if self._temperature_unit == UnitOfTemperature.FAHRENHEIT:
-            temp = (temp - 32.0) * 5.0 / 9.0
-        return temp
 
     async def async_set_target_temperature(self, value_celsius: float) -> None:
         """Update the target temperature (always in °C) without starting a cook."""
