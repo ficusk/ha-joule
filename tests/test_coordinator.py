@@ -177,6 +177,14 @@ async def test_start_cooking_updates_is_cooking(
     """After async_start_cooking, coordinator data reflects is_cooking=True."""
     coordinator: JouleCoordinator = hass.data[DOMAIN][setup_integration.entry_id]
 
+    # Simulate Joule accepting the cook command (StartProgramReply result=0)
+    async def _simulate_start_reply(*args, **kwargs):
+        coordinator._start_program_reply_received = True
+        coordinator._start_program_reply_result = 0
+        coordinator._notification_received.set()
+
+    mock_ble_api.write_message.side_effect = _simulate_start_reply
+
     await coordinator.async_start_cooking(65.0, 90.0)
     await hass.async_block_till_done()
 
@@ -191,6 +199,7 @@ async def test_start_cooking_stores_settings_in_data(
     """After async_start_cooking, target_temperature and cook_time_minutes are updated."""
     coordinator: JouleCoordinator = hass.data[DOMAIN][setup_integration.entry_id]
 
+    # Settings are always published regardless of device reply
     await coordinator.async_start_cooking(65.0, 90.0)
     await hass.async_block_till_done()
 
@@ -238,10 +247,24 @@ async def test_stop_cooking_updates_is_cooking(
     """After async_stop_cooking, coordinator data reflects is_cooking=False."""
     coordinator: JouleCoordinator = hass.data[DOMAIN][setup_integration.entry_id]
 
-    # Start first so we have something to stop.
+    # Simulate Joule accepting start then stop
+    async def _simulate_start_reply(*args, **kwargs):
+        coordinator._start_program_reply_received = True
+        coordinator._start_program_reply_result = 0
+        coordinator._notification_received.set()
+
+    mock_ble_api.write_message.side_effect = _simulate_start_reply
+
     await coordinator.async_start_cooking(65.0, 90.0)
     await hass.async_block_till_done()
     assert coordinator.data["is_cooking"] is True
+
+    # Switch to simulating stop reply
+    async def _simulate_stop_reply(*args, **kwargs):
+        coordinator._stop_circulator_reply_result = 0
+        coordinator._notification_received.set()
+
+    mock_ble_api.write_message.side_effect = _simulate_stop_reply
 
     await coordinator.async_stop_cooking()
     await hass.async_block_till_done()

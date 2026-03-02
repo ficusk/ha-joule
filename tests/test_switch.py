@@ -143,7 +143,16 @@ async def test_turn_on_sets_switch_state_to_on(
     mock_ble_api: MagicMock,
 ) -> None:
     """After turn on, the switch reports state On."""
+    coordinator: JouleCoordinator = hass.data[DOMAIN][setup_integration.entry_id]
     entity_id = _get_switch_entity_id(hass)
+
+    # Simulate Joule accepting the cook command (StartProgramReply result=0)
+    async def _simulate_start_reply(*args, **kwargs):
+        coordinator._start_program_reply_received = True
+        coordinator._start_program_reply_result = 0
+        coordinator._notification_received.set()
+
+    mock_ble_api.write_message.side_effect = _simulate_start_reply
 
     await hass.services.async_call(
         "switch", "turn_on", {"entity_id": entity_id}, blocking=True
@@ -162,7 +171,7 @@ async def test_turn_on_updates_state_attributes(
     coordinator: JouleCoordinator = hass.data[DOMAIN][setup_integration.entry_id]
     entity_id = _get_switch_entity_id(hass)
 
-    # Start a cook with custom values to populate coordinator.data.
+    # Settings are always published regardless of device reply
     await coordinator.async_start_cooking(75.0, 120.0)
     await hass.async_block_till_done()
 

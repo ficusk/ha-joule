@@ -41,6 +41,16 @@ from .joule_proto import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Result enum from [redacted] SDK base.proto
+_RESULT_NAMES: dict[int, str] = {
+    0: "CS_SUCCESS",
+    3: "CS_ERROR_INTERNAL",
+    5: "CS_ERROR_NOT_FOUND",
+    7: "CS_ERROR_INVALID_PARAM",
+    8: "CS_ERROR_INVALID_STATE",
+    13: "CS_ERROR_TIMEOUT",
+}
+
 
 class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Single owner of the BLE connection; provides data to all entities.
@@ -70,6 +80,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._subscribed: bool = False
         self._authenticated: bool = False
         self._start_program_reply_received: bool = False
+        self._start_program_reply_result: int | None = None
+        self._stop_circulator_reply_result: int | None = None
         # Load persisted auth key from config entry options (if previously paired)
         stored_key = entry.options.get(CONF_BLE_AUTH_KEY)
         self._auth_key: bytes | None = (
@@ -157,17 +169,23 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._authenticated = True
                 self._notification_received.set()
             elif msg.start_program_reply is not None:
+                result = msg.start_program_reply.result
+                result_name = _RESULT_NAMES.get(result, f"UNKNOWN({result})")
                 _LOGGER.warning(
-                    "Got StartProgramReply from %s! result=%d",
-                    source, msg.start_program_reply.result,
+                    "Got StartProgramReply from %s! result=%d (%s)",
+                    source, result, result_name,
                 )
                 self._start_program_reply_received = True
+                self._start_program_reply_result = result
                 self._notification_received.set()
             elif msg.stop_circulator_reply is not None:
+                result = msg.stop_circulator_reply.result
+                result_name = _RESULT_NAMES.get(result, f"UNKNOWN({result})")
                 _LOGGER.warning(
-                    "Got StopCirculatorReply from %s! result=%d",
-                    source, msg.stop_circulator_reply.result,
+                    "Got StopCirculatorReply from %s! result=%d (%s)",
+                    source, result, result_name,
                 )
+                self._stop_circulator_reply_result = result
                 self._notification_received.set()
             elif msg.identify_circulator_reply is not None:
                 _LOGGER.warning(
@@ -480,6 +498,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._subscribed = False
                 self._authenticated = False
                 self._start_program_reply_received = False
+                self._start_program_reply_result = None
+                self._stop_circulator_reply_result = None
 
             # Step 1: Subscribe to notifications on 4325
             if not self._subscribed:
@@ -609,8 +629,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 feed_id, seq_num, step_before,
             )
 
-            # Reset reply flag before sending cook commands
+            # Reset reply tracking before sending cook commands
             self._start_program_reply_received = False
+            self._start_program_reply_result = None
 
             # Pre-cook: IdentifyCirculatorRequest (iOS does this before cook)
             identify_payload = build_identify_circulator_message(
@@ -635,10 +656,23 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
             # Check for real response (StartProgramReply or step change)
+            cook_accepted = False
             if self._start_program_reply_received:
-                _LOGGER.warning(
-                    "Compact cook: got StartProgramReply! Cook accepted."
-                )
+                if self._start_program_reply_result == 0:
+                    _LOGGER.warning("Compact cook: StartProgramReply result=0 — cook accepted!")
+                    cook_accepted = True
+                else:
+                    result_name = _RESULT_NAMES.get(
+                        self._start_program_reply_result or -1, "UNKNOWN",
+                    )
+                    _LOGGER.warning(
+                        "Compact cook: StartProgramReply result=%s (%s) — "
+                        "Joule REJECTED the command, trying full message",
+                        self._start_program_reply_result, result_name,
+                    )
+                    # Reset for next attempt
+                    self._start_program_reply_received = False
+                    self._start_program_reply_result = None
             elif (
                 self._latest_data_point is not None
                 and self._latest_data_point.program_step != step_before
@@ -648,6 +682,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Compact cook: program_step changed %s → %s! Cook accepted.",
                     step_before, self._latest_data_point.program_step,
                 )
+                cook_accepted = True
             else:
                 _LOGGER.warning(
                     "Compact cook: no StartProgramReply, step still %s "
@@ -656,45 +691,64 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if self._latest_data_point else "unknown",
                 )
 
-            # Attempt 2: full iOS-matching message (68 bytes)
-            full_payload = build_start_cook_message(
-                target_temperature,
-                cook_time_seconds,
-                sender=b"",
-                recipient=b"",
-                handle=self._new_handle(),
-                feed_id=feed_id,
-                sequence_number=seq_num,
-            )
-            await self._try_write_and_wait(
-                "StartProgram-full", full_payload, 5.0,
-            )
+            # Attempt 2: full iOS-matching message (68 bytes) — skip if compact succeeded
+            if not cook_accepted:
+                full_payload = build_start_cook_message(
+                    target_temperature,
+                    cook_time_seconds,
+                    sender=b"",
+                    recipient=b"",
+                    handle=self._new_handle(),
+                    feed_id=feed_id,
+                    sequence_number=seq_num,
+                )
+                await self._try_write_and_wait(
+                    "StartProgram-full", full_payload, 5.0,
+                )
 
-            # Final check
-            if self._start_program_reply_received:
-                _LOGGER.warning(
-                    "Full cook: got StartProgramReply! Cook accepted."
-                )
-            elif (
-                self._latest_data_point is not None
-                and self._latest_data_point.program_step != step_before
-                and self._latest_data_point.program_step != ProgramStep.UNKNOWN
-            ):
-                _LOGGER.warning(
-                    "Full cook: program_step changed %s → %s! Cook accepted.",
-                    step_before, self._latest_data_point.program_step,
-                )
-            else:
-                _LOGGER.warning(
-                    "Both cook messages sent — NO StartProgramReply received, "
-                    "program_step still %s. Joule may have ignored the commands.",
-                    self._latest_data_point.program_step
-                    if self._latest_data_point else "unknown",
-                )
+                # Final check
+                if self._start_program_reply_received:
+                    if self._start_program_reply_result == 0:
+                        _LOGGER.warning("Full cook: StartProgramReply result=0 — cook accepted!")
+                        cook_accepted = True
+                    else:
+                        result_name = _RESULT_NAMES.get(
+                            self._start_program_reply_result or -1, "UNKNOWN",
+                        )
+                        _LOGGER.warning(
+                            "Full cook: StartProgramReply result=%s (%s) — "
+                            "Joule REJECTED the command",
+                            self._start_program_reply_result, result_name,
+                        )
+                elif (
+                    self._latest_data_point is not None
+                    and self._latest_data_point.program_step != step_before
+                    and self._latest_data_point.program_step != ProgramStep.UNKNOWN
+                ):
+                    _LOGGER.warning(
+                        "Full cook: program_step changed %s → %s! Cook accepted.",
+                        step_before, self._latest_data_point.program_step,
+                    )
+                    cook_accepted = True
+                else:
+                    _LOGGER.warning(
+                        "Both cook messages sent — NO successful reply, "
+                        "program_step still %s. Joule rejected the commands.",
+                        self._latest_data_point.program_step
+                        if self._latest_data_point else "unknown",
+                    )
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
 
-        self._is_cooking = True
+        if cook_accepted:
+            self._is_cooking = True
+        else:
+            _LOGGER.warning(
+                "Cook command NOT accepted — switch stays off. "
+                "Check Joule logs for error details."
+            )
+        # Always publish state — settings (target_temp, cook_time) are user
+        # intent and should be reflected in entities even if the cook was rejected.
         self._publish_state()
 
     def _publish_state(self) -> None:
@@ -747,6 +801,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self.api.ensure_connected()
 
+            self._stop_circulator_reply_result = None
             _LOGGER.warning("StopCirculatorRequest: empty body (no concurrency fields)")
 
             payload = build_stop_cook_message(
@@ -762,5 +817,21 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to stop cooking: {err}") from err
 
-        self._is_cooking = False
-        self._publish_state()
+        if self._stop_circulator_reply_result == 0:
+            _LOGGER.warning("Stop accepted (result=0) — switching off")
+            self._is_cooking = False
+            self._publish_state()
+        elif self._stop_circulator_reply_result is not None:
+            result_name = _RESULT_NAMES.get(
+                self._stop_circulator_reply_result, "UNKNOWN",
+            )
+            _LOGGER.warning(
+                "Stop REJECTED: result=%d (%s) — switch stays on",
+                self._stop_circulator_reply_result, result_name,
+            )
+        else:
+            _LOGGER.warning(
+                "No StopCirculatorReply received — assuming stopped"
+            )
+            self._is_cooking = False
+            self._publish_state()
