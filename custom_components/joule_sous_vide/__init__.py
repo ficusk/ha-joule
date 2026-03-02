@@ -11,8 +11,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
 from homeassistant.core import CoreState, Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+import homeassistant.helpers.config_validation as cv
 
 from .const import DOMAIN
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 from .coordinator import JouleCoordinator
 
 _LOGGER = logging.getLogger(__name__)
