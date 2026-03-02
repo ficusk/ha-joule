@@ -163,6 +163,12 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._start_program_reply_received = True
                 self._notification_received.set()
+            elif msg.stop_circulator_reply is not None:
+                _LOGGER.warning(
+                    "Got StopCirculatorReply from %s! result=%d",
+                    source, msg.stop_circulator_reply.result,
+                )
+                self._notification_received.set()
             elif msg.identify_circulator_reply is not None:
                 _LOGGER.warning(
                     "Got IdentifyCirculatorReply from %s! result=%d",
@@ -738,6 +744,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._latest_data_point is not None:
                 feed_id = self._latest_data_point.feed_id
                 seq_num = self._latest_data_point.sequence_number
+            _LOGGER.warning(
+                "StopCirculatorRequest: feed_id=%d seq=%d",
+                feed_id, seq_num,
+            )
 
             payload = build_stop_cook_message(
                 sender=b"",
@@ -746,11 +756,9 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 feed_id=feed_id,
                 sequence_number=seq_num,
             )
-            _LOGGER.warning(
-                "StopCirculatorRequest (%d bytes): %s",
-                len(payload), payload.hex(),
+            await self._try_write_and_wait(
+                "StopCirculator", payload, 5.0,
             )
-            await self.api.write_message(payload)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to stop cooking: {err}") from err
 

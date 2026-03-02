@@ -32,6 +32,7 @@ FIELD_PING = 18
 FIELD_PONG = 19
 FIELD_START_PROGRAM_REQUEST = 50
 FIELD_STOP_CIRCULATOR_REQUEST = 60
+FIELD_STOP_CIRCULATOR_REPLY = 61
 FIELD_BEGIN_LIVE_FEED_REQUEST = 70
 FIELD_CIRCULATOR_DATA_POINT = 90
 FIELD_START_KEY_EXCHANGE_REQUEST = 120
@@ -220,6 +221,13 @@ class StopCirculatorRequest:
 
 
 @dataclass
+class StopCirculatorReply:
+    """Device response to a StopCirculatorRequest."""
+
+    result: int = 0  # field 1, enum Result
+
+
+@dataclass
 class StartKeyExchangeRequest:
     """Initiate BLE key exchange (empty body)."""
 
@@ -299,6 +307,7 @@ class StreamMessage:
     start_program_request: StartProgramRequest | None = None  # field 50
     start_program_reply: StartProgramReply | None = None  # field 51
     stop_circulator_request: StopCirculatorRequest | None = None  # field 60
+    stop_circulator_reply: StopCirculatorReply | None = None  # field 61
     begin_live_feed_request: BeginLiveFeedRequest | None = None  # field 70
     circulator_data_point: CirculatorDataPoint | None = None  # field 90
     start_key_exchange_request: StartKeyExchangeRequest | None = None  # field 120
@@ -494,6 +503,15 @@ def decode_stream_message(data: bytes) -> StreamMessage:
                 if fn == 1 and wt == WIRETYPE_VARINT:
                     reply.result = val
             message.start_program_reply = reply
+        elif (
+            field_number == FIELD_STOP_CIRCULATOR_REPLY
+            and wire_type == WIRETYPE_LENGTH_DELIMITED
+        ):
+            reply = StopCirculatorReply()
+            for fn, wt, val in decode_fields(value):
+                if fn == 1 and wt == WIRETYPE_VARINT:
+                    reply.result = val
+            message.stop_circulator_reply = reply
         elif (
             field_number == FIELD_CIRCULATOR_DATA_POINT
             and wire_type == WIRETYPE_LENGTH_DELIMITED
