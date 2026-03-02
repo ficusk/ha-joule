@@ -1,18 +1,19 @@
 /**
  * Joule Sous Vide — Custom Lovelace Card
- * Version: 0.5.0
  *
- * Config:
+ * Config (minimal — entities are auto-discovered):
  *   type: custom:joule-sous-vide-card
  *   title: "Joule"                  (optional)
- *   entity_switch:       switch.joule_sous_vide
- *   entity_current_temp: sensor.joule_current_temperature
- *   entity_target_temp:  number.joule_target_temperature
- *   entity_cook_time:    number.joule_cook_time
- *   entity_unit:         select.joule_temperature_unit
+ *
+ * Override auto-discovery by specifying entity IDs explicitly:
+ *   entity_switch:       switch.joule_sous_vide_sous_vide
+ *   entity_current_temp: sensor.joule_sous_vide_current_temperature
+ *   entity_target_temp:  number.joule_sous_vide_target_temperature
+ *   entity_cook_time:    number.joule_sous_vide_cook_time
+ *   entity_unit:         select.joule_sous_vide_temperature_unit
  */
 
-const CARD_VERSION = "0.6.0";
+const CARD_VERSION = "0.7.0";
 console.info(
   `%c JOULE-SOUS-VIDE-CARD %c v${CARD_VERSION} `,
   "color: white; background: #03a9f4; font-weight: bold; padding: 2px 6px; border-radius: 3px 0 0 3px;",
@@ -38,51 +39,79 @@ class JouleSousVideCard extends HTMLElement {
     return 4;
   }
 
+  /* ─── Entity auto-discovery ─────────────────────────────────── */
+
+  _resolveEntities(hass, cfg) {
+    // Use explicit config if all five entity IDs are provided
+    if (
+      cfg.entity_switch &&
+      cfg.entity_current_temp &&
+      cfg.entity_target_temp &&
+      cfg.entity_cook_time &&
+      cfg.entity_unit
+    ) {
+      return cfg;
+    }
+
+    // Auto-discover by scanning hass.states for Joule entities
+    const ids = Object.keys(hass.states);
+    return {
+      entity_switch:
+        cfg.entity_switch ||
+        ids.find((id) => id.startsWith("switch.") && id.includes("joule")) ||
+        "",
+      entity_current_temp:
+        cfg.entity_current_temp ||
+        ids.find(
+          (id) =>
+            id.startsWith("sensor.") &&
+            id.includes("joule") &&
+            id.includes("temp")
+        ) ||
+        "",
+      entity_target_temp:
+        cfg.entity_target_temp ||
+        ids.find(
+          (id) =>
+            id.startsWith("number.") &&
+            id.includes("joule") &&
+            id.includes("target")
+        ) ||
+        "",
+      entity_cook_time:
+        cfg.entity_cook_time ||
+        ids.find(
+          (id) =>
+            id.startsWith("number.") &&
+            id.includes("joule") &&
+            id.includes("cook")
+        ) ||
+        "",
+      entity_unit:
+        cfg.entity_unit ||
+        ids.find(
+          (id) =>
+            id.startsWith("select.") &&
+            id.includes("joule") &&
+            id.includes("unit")
+        ) ||
+        "",
+    };
+  }
+
   /* ─── Rendering ─────────────────────────────────────────────── */
 
   _render() {
     if (!this._hass || !this._config) return;
 
     const hass = this._hass;
-    const cfg = this._config;
+    const resolved = this._resolveEntities(hass, this._config);
 
-    // Show setup message when required entity fields are not yet configured
-    // (HA's card editor calls setConfig with partial config initially)
-    if (
-      !cfg.entity_switch ||
-      !cfg.entity_current_temp ||
-      !cfg.entity_target_temp ||
-      !cfg.entity_cook_time ||
-      !cfg.entity_unit
-    ) {
-      this.shadowRoot.innerHTML = `
-        <div style="
-          padding: 16px;
-          font-family: var(--paper-font-body1_-_font-family, sans-serif);
-          color: var(--primary-text-color, #212121);
-          background: var(--ha-card-background, var(--card-background-color, white));
-          border-radius: var(--ha-card-border-radius, 12px);
-          box-shadow: var(--ha-card-box-shadow, 0 2px 4px rgba(0,0,0,.14));
-        ">
-          <div style="font-size: 16px; font-weight: 500; margin-bottom: 8px;">
-            Joule Sous Vide
-          </div>
-          <div style="font-size: 13px; color: var(--secondary-text-color, #727272);">
-            Add the required entity fields in the card YAML editor:<br>
-            <code>entity_switch</code>, <code>entity_current_temp</code>,
-            <code>entity_target_temp</code>, <code>entity_cook_time</code>,
-            <code>entity_unit</code>
-          </div>
-        </div>
-      `;
-      return;
-    }
-
-    const switchState = hass.states[cfg.entity_switch];
-    const currentTempState = hass.states[cfg.entity_current_temp];
-    const targetTempState = hass.states[cfg.entity_target_temp];
-    const cookTimeState = hass.states[cfg.entity_cook_time];
-    const unitState = hass.states[cfg.entity_unit];
+    const switchState = hass.states[resolved.entity_switch];
+    const currentTempState = hass.states[resolved.entity_current_temp];
+    const targetTempState = hass.states[resolved.entity_target_temp];
+    const cookTimeState = hass.states[resolved.entity_cook_time];
+    const unitState = hass.states[resolved.entity_unit];
 
     const unavailable =
       !switchState ||
@@ -128,7 +157,7 @@ class JouleSousVideCard extends HTMLElement {
     const cookTimeDisplay =
       cookTime === 0 ? "∞" : `${Math.floor(cookTime / 60)}h ${cookTime % 60}m`;
 
-    const title = cfg.title || "Joule Sous Vide";
+    const title = this._config.title || "Joule Sous Vide";
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -381,7 +410,7 @@ class JouleSousVideCard extends HTMLElement {
       .getElementById("target-down")
       .addEventListener("click", () => {
         const newVal = Math.max(targetMin, parseFloat(targetTemp) - targetStep);
-        this._callService("number", "set_value", cfg.entity_target_temp, {
+        this._callService("number", "set_value", resolved.entity_target_temp, {
           value: newVal,
         });
       });
@@ -390,7 +419,7 @@ class JouleSousVideCard extends HTMLElement {
       .getElementById("target-up")
       .addEventListener("click", () => {
         const newVal = Math.min(targetMax, parseFloat(targetTemp) + targetStep);
-        this._callService("number", "set_value", cfg.entity_target_temp, {
+        this._callService("number", "set_value", resolved.entity_target_temp, {
           value: newVal,
         });
       });
@@ -400,7 +429,7 @@ class JouleSousVideCard extends HTMLElement {
       .getElementById("time-down")
       .addEventListener("click", () => {
         const newVal = Math.max(cookMin, cookTime - 5);
-        this._callService("number", "set_value", cfg.entity_cook_time, {
+        this._callService("number", "set_value", resolved.entity_cook_time, {
           value: newVal,
         });
       });
@@ -409,7 +438,7 @@ class JouleSousVideCard extends HTMLElement {
       .getElementById("time-up")
       .addEventListener("click", () => {
         const newVal = Math.min(cookMax, cookTime + 5);
-        this._callService("number", "set_value", cfg.entity_cook_time, {
+        this._callService("number", "set_value", resolved.entity_cook_time, {
           value: newVal,
         });
       });
@@ -417,7 +446,7 @@ class JouleSousVideCard extends HTMLElement {
     // Wire up unit toggle
     this.shadowRoot.getElementById("unit-f").addEventListener("click", () => {
       if (unit !== "°F") {
-        this._callService("select", "select_option", cfg.entity_unit, {
+        this._callService("select", "select_option", resolved.entity_unit, {
           option: "°F",
         });
       }
@@ -425,7 +454,7 @@ class JouleSousVideCard extends HTMLElement {
 
     this.shadowRoot.getElementById("unit-c").addEventListener("click", () => {
       if (unit !== "°C") {
-        this._callService("select", "select_option", cfg.entity_unit, {
+        this._callService("select", "select_option", resolved.entity_unit, {
           option: "°C",
         });
       }
@@ -436,9 +465,9 @@ class JouleSousVideCard extends HTMLElement {
       .getElementById("toggle-cooking")
       .addEventListener("click", () => {
         if (isCooking) {
-          this._callService("switch", "turn_off", cfg.entity_switch);
+          this._callService("switch", "turn_off", resolved.entity_switch);
         } else {
-          this._callService("switch", "turn_on", cfg.entity_switch);
+          this._callService("switch", "turn_on", resolved.entity_switch);
         }
       });
   }
