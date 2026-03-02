@@ -39,6 +39,7 @@ from custom_components.joule_sous_vide.joule_proto import (
     decode_circulator_data_point,
     decode_stream_message,
     # High-level API
+    build_compact_start_cook_message,
     build_live_feed_message,
     build_start_cook_message,
     build_stop_cook_message,
@@ -485,6 +486,77 @@ class TestBuildStartCookMessage:
         assert 6 in program_map
         # field 7 = 0 (unknown purpose, iOS always sends it)
         assert program_map[7][1] == 0
+
+
+class TestBuildCompactStartCookMessage:
+    def test_returns_bytes(self):
+        result = build_compact_start_cook_message(60.0)
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+    def test_size_without_concurrency(self):
+        """Without feedId/seqNum, message is 21 bytes (≤2 Long Write chunks)."""
+        result = build_compact_start_cook_message(60.0, handle=1)
+        assert len(result) == 21
+
+    def test_size_with_concurrency(self):
+        """With feedId/seqNum, message is still compact (≤40 bytes, 2 chunks)."""
+        result = build_compact_start_cook_message(
+            60.0, handle=1, feed_id=15493887, sequence_number=73234,
+        )
+        # Should be ~30 bytes — well under the 4-chunk threshold (>60 bytes)
+        assert len(result) <= 40
+
+    def test_contains_set_point(self):
+        """Verify the compact message contains the set_point float."""
+        data = build_compact_start_cook_message(75.0, handle=42)
+        fields = decode_fields(data)
+
+        # Find StartProgramRequest (field 50)
+        spr_bytes = None
+        for fn, wt, val in fields:
+            if fn == 50 and wt == WIRETYPE_LENGTH_DELIMITED:
+                spr_bytes = val
+                break
+        assert spr_bytes is not None
+
+        # Find CirculatorProgram (field 1 inside SPR)
+        inner = decode_fields(spr_bytes)
+        program_bytes = None
+        for fn, wt, val in inner:
+            if fn == 1 and wt == WIRETYPE_LENGTH_DELIMITED:
+                program_bytes = val
+                break
+        assert program_bytes is not None
+
+        # Verify setPoint and programType
+        program_fields = decode_fields(program_bytes)
+        program_map = {fn: (wt, v) for fn, wt, v in program_fields}
+        assert struct.unpack("<f", program_map[1][1])[0] == pytest.approx(75.0)
+        assert 5 in program_map  # programType
+        assert program_map[5][1] == 0  # MANUAL
+        # No ProgramMetadata or field 7
+        assert 6 not in program_map
+        assert 7 not in program_map
+
+    def test_no_program_metadata(self):
+        """Compact message omits ProgramMetadata (iOS-only, not in [redacted] SDK)."""
+        data = build_compact_start_cook_message(60.0)
+        fields = decode_fields(data)
+        spr_bytes = next(v for fn, wt, v in fields if fn == 50)
+        inner = decode_fields(spr_bytes)
+        prog_bytes = next(v for fn, wt, v in inner if fn == 1)
+        prog_fields = decode_fields(prog_bytes)
+        field_nums = [fn for fn, _, _ in prog_fields]
+        assert 6 not in field_nums  # no ProgramMetadata
+        assert 7 not in field_nums  # no field 7
+
+    def test_smaller_than_full_message(self):
+        """Compact message must be significantly smaller than the full message."""
+        compact = build_compact_start_cook_message(60.0, handle=1)
+        full = build_start_cook_message(60.0, 3600, handle=1)
+        assert len(compact) < len(full)
+        assert len(compact) < 40  # well under the 60-byte 4-chunk boundary
 
 
 class TestBuildStopCookMessage:

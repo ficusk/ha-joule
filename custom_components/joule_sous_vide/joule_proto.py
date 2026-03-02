@@ -570,6 +570,54 @@ def build_start_cook_message(
     return encode_stream_message(msg)
 
 
+def build_compact_start_cook_message(
+    set_point_celsius: float,
+    sender: bytes = b"",
+    recipient: bytes = b"",
+    handle: int = 0,
+    feed_id: int = 0,
+    sequence_number: int = 0,
+) -> bytes:
+    """Build a minimal StartProgramRequest (~21–30 bytes).
+
+    At MTU=23 (20-byte ATT payload), messages >20 bytes require the BLE
+    Long Write procedure (Prepare Write + Execute Write).  The full iOS-
+    matching message is 68 bytes (4 Long Write chunks); auth messages are
+    ~24 bytes (2 chunks) and work fine.  This compact variant omits iOS-
+    only fields (ProgramMetadata, field 7) to keep the message at ~21–30
+    bytes (≤2 Long Write chunks), matching the pattern that already works.
+
+    Fields included:
+    - CirculatorProgram: setPoint (field 1) + programType (field 5)
+    - feedId + sequenceNumber (optimistic concurrency, when non-zero)
+
+    Fields omitted vs. full message:
+    - ProgramMetadata (field 6 of CirculatorProgram) — iOS-only, not in
+      [redacted] SDK proto
+    - field 7 = 0 — unknown purpose, not in [redacted] SDK proto
+    - cook_time — iOS never sends it for MANUAL programs
+    """
+    # Build CirculatorProgram manually — just setPoint + programType
+    program_bytes = encode_field_float(1, set_point_celsius)
+    program_bytes += encode_field_varint(5, ProgramType.MANUAL)
+
+    # Build StartProgramRequest
+    spr_bytes = encode_field_bytes(1, program_bytes)
+    if feed_id:
+        spr_bytes += encode_field_varint(2, feed_id)
+    if sequence_number:
+        spr_bytes += encode_field_varint(3, sequence_number)
+
+    # Build StreamMessage envelope
+    h = handle if handle != 0 else _random_handle()
+    result = encode_field_fixed32(1, h)
+    result += encode_field_bytes(5, sender)
+    result += encode_field_bytes(6, recipient)
+    result += encode_field_bytes(FIELD_START_PROGRAM_REQUEST, spr_bytes)
+
+    return result
+
+
 def build_stop_cook_message(
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,

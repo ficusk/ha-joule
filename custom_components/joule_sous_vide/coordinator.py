@@ -27,6 +27,8 @@ from .joule_ble import JouleBLEAPI, JouleBLEError
 from .joule_proto import (
     CirculatorDataPoint,
     ProgramStep,
+    build_compact_start_cook_message,
+    build_identify_circulator_message,
     build_live_feed_message,
     build_start_cook_message,
     build_start_key_exchange_message,
@@ -557,11 +559,18 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Send a protobuf StartProgramRequest to the device.
 
-        Matches the iOS app's structure exactly:
-        - Empty sender/recipient addresses
-        - CirculatorProgram with ProgramMetadata (random cookId UUID)
-        - feedId + sequenceNumber from the latest CirculatorDataPoint
-        - Single write (no dual-variant)
+        At MTU=23 (20-byte ATT payload), messages >20 bytes require the BLE
+        Long Write procedure.  Auth messages (~24 bytes, 2 Long Write chunks)
+        work fine.  The full iOS-matching cook message is 68 bytes (4 chunks)
+        and has never worked — BlueZ may handle 4-chunk Long Writes differently
+        from CoreBluetooth.
+
+        Strategy:
+          1. Send IdentifyCirculatorRequest (12 bytes, single ATT write) —
+             the iOS app sends this before cook commands
+          2. Try a compact cook message (~21–30 bytes, ≤2 Long Write chunks)
+             matching the [redacted] SDK structure
+          3. Fall back to the full 68-byte iOS-matching message
         """
         self._target_temperature = target_temperature
         self._cook_time_minutes = cook_time_minutes
@@ -569,9 +578,6 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.api.ensure_connected()
             cook_time_seconds = int(cook_time_minutes * 60)
 
-            # Optimistic concurrency: include feedId and sequenceNumber from
-            # the latest CirculatorDataPoint.  The iOS app always sends these;
-            # the Joule rejects commands without proof of current state.
             feed_id = 0
             seq_num = 0
             if self._latest_data_point is not None:
@@ -579,11 +585,53 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 seq_num = self._latest_data_point.sequence_number
             _LOGGER.warning(
                 "StartProgramRequest: temp=%.1f°C cook_time=%ds "
-                "feed_id=%d seq=%d",
-                target_temperature, cook_time_seconds, feed_id, seq_num,
+                "feed_id=%d seq=%d handle=%08x",
+                target_temperature, cook_time_seconds,
+                feed_id, seq_num, self._session_handle,
             )
 
-            payload = build_start_cook_message(
+            # Pre-cook: IdentifyCirculatorRequest (iOS does this before cook)
+            identify_payload = build_identify_circulator_message(
+                sender=b"",
+                recipient=b"",
+                handle=self._session_handle,
+            )
+            _LOGGER.warning(
+                "Pre-cook IdentifyCirculatorRequest (%d bytes): %s",
+                len(identify_payload), identify_payload.hex(),
+            )
+            await self._safe_write("IdentifyCirculator", identify_payload)
+            await asyncio.sleep(0.5)
+
+            # Attempt 1: compact message (~21–30 bytes, ≤2 Long Write chunks)
+            # Omits ProgramMetadata + field 7 that aren't in [redacted] SDK.
+            compact_payload = build_compact_start_cook_message(
+                target_temperature,
+                sender=b"",
+                recipient=b"",
+                handle=self._session_handle,
+                feed_id=feed_id,
+                sequence_number=seq_num,
+            )
+            _LOGGER.warning(
+                "Compact StartProgramRequest (%d bytes): %s",
+                len(compact_payload), compact_payload.hex(),
+            )
+            got_reply = await self._try_write_and_wait(
+                "StartProgram-compact", compact_payload, 5.0,
+            )
+            if got_reply:
+                _LOGGER.warning(
+                    "Compact cook message got a response! "
+                    "Long Write 4-chunk theory confirmed."
+                )
+            else:
+                _LOGGER.warning(
+                    "No response to compact cook — trying full 68-byte message"
+                )
+
+            # Attempt 2: full iOS-matching message (68 bytes, 4 Long Write chunks)
+            full_payload = build_start_cook_message(
                 target_temperature,
                 cook_time_seconds,
                 sender=b"",
@@ -593,10 +641,14 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sequence_number=seq_num,
             )
             _LOGGER.warning(
-                "StartProgramRequest (%d bytes): %s",
-                len(payload), payload.hex(),
+                "Full StartProgramRequest (%d bytes): %s",
+                len(full_payload), full_payload.hex(),
             )
-            await self.api.write_message(payload)
+            got_reply = await self._try_write_and_wait(
+                "StartProgram-full", full_payload, 5.0,
+            )
+            if got_reply:
+                _LOGGER.warning("Full cook message got a response!")
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
 
