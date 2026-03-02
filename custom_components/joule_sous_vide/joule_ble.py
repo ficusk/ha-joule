@@ -43,6 +43,7 @@ class JouleBLEAPI:
         self._hass = hass
         self.mac_address = mac_address
         self._client: BleakClient | None = None
+        self._is_local: bool = True  # assume local until connect()
         # 8-byte circulator address from BLE manufacturer advertising data.
         # The Joule advertises under company ID 0x0159 (ChefSteps); the payload
         # is the 8-byte address used as recipientAddress in protobuf messages.
@@ -178,6 +179,8 @@ class JouleBLEAPI:
                 getattr(ble_device, "rssi", "N/A"),
             )
 
+            self._is_local = is_local
+
             client = await establish_connection(
                 BleakClient, ble_device, self.mac_address
             )
@@ -213,6 +216,15 @@ class JouleBLEAPI:
             return self._client.mtu_size
         except Exception:  # noqa: BLE001
             return 0
+
+    @property
+    def is_connected_via_proxy(self) -> bool:
+        """Return True if connected through an ESPHome Bluetooth Proxy."""
+        return (
+            not self._is_local
+            and self._client is not None
+            and self._client.is_connected
+        )
 
     async def _request_mtu(self, client: BleakClient) -> None:
         """Try to negotiate a larger MTU with the device.

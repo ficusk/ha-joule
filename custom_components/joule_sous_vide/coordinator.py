@@ -41,6 +41,8 @@ from .joule_proto import (
 
 _LOGGER = logging.getLogger(__name__)
 
+PROXY_POLL_INTERVAL: float = 1.0  # seconds between 4323 polls (proxy mode)
+
 # Result enum from [redacted] SDK base.proto
 _RESULT_NAMES: dict[int, str] = {
     0: "CS_SUCCESS",
@@ -82,6 +84,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._start_program_reply_received: bool = False
         self._start_program_reply_result: int | None = None
         self._stop_circulator_reply_result: int | None = None
+        self._proxy_poll_task: asyncio.Task | None = None
+        self._last_polled_data: bytes | None = None  # dedup for proxy polling
         # Load persisted auth key from config entry options (if previously paired)
         stored_key = entry.options.get(CONF_BLE_AUTH_KEY)
         self._auth_key: bytes | None = (
@@ -273,9 +277,14 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning("Write failed for %s: %s", label, err)
             return False
 
-        # Poll: wait for notification OR check 4323+4325 every 5 seconds
+        # Poll: wait for notification OR check 4323+4325 periodically.
+        # Use faster polling when connected via proxy (notifications unreliable).
         elapsed = 0.0
-        poll_interval = 5.0
+        poll_interval = (
+            PROXY_POLL_INTERVAL
+            if self.api.is_connected_via_proxy
+            else 5.0
+        )
         while elapsed < timeout:
             wait_time = min(poll_interval, timeout - elapsed)
             try:
@@ -320,6 +329,57 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             _LOGGER.warning("%s: empty", label)
         return data
+
+    async def _start_proxy_poller(self) -> None:
+        """Start the background 4323 poller for proxy connections."""
+        if self._proxy_poll_task is not None:
+            return
+        self._proxy_poll_task = self.hass.async_create_background_task(
+            self._proxy_poll_loop(), "joule_proxy_poll"
+        )
+        _LOGGER.warning("Started background 4323 poller (proxy mode)")
+
+    async def _stop_proxy_poller(self) -> None:
+        """Cancel the background 4323 poller."""
+        if self._proxy_poll_task is not None:
+            self._proxy_poll_task.cancel()
+            try:
+                await self._proxy_poll_task
+            except asyncio.CancelledError:
+                pass
+            self._proxy_poll_task = None
+            _LOGGER.warning("Stopped background 4323 poller")
+
+    async def _proxy_poll_loop(self) -> None:
+        """Poll 4323 every PROXY_POLL_INTERVAL seconds (proxy mode).
+
+        ESPHome Bluetooth Proxies don't forward notifications on 4325,
+        but the Joule still updates 4323 server-side.  This loop reads
+        4323 directly as a substitute for the notification-triggered-read
+        pattern.  Identical consecutive reads are deduplicated.
+        """
+        while True:
+            await asyncio.sleep(PROXY_POLL_INTERVAL)
+            try:
+                data = await self.api.read_characteristic(READ_CHAR_UUID)
+                if data and data != self._last_polled_data:
+                    self._last_polled_data = data
+                    _LOGGER.warning(
+                        "Proxy poll: new data from 4323: %d bytes: %s",
+                        len(data), data.hex(),
+                    )
+                    self._try_decode_message(data, source="4323-proxy-poll")
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning("Proxy poll: read failed")
+
+    async def async_shutdown(self) -> None:
+        """Cancel the proxy poller and scheduled refreshes.
+
+        Called automatically by HA via config_entry.async_on_unload.
+        BLE disconnect is handled separately by async_unload_entry.
+        """
+        await self._stop_proxy_poller()
+        await super().async_shutdown()
 
     async def _key_exchange(self) -> bool:
         """Perform application-level key exchange with the Joule.
@@ -495,6 +555,8 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             reconnected = await self.api.ensure_connected()
             if reconnected:
                 _LOGGER.warning("Fresh BLE connection — resetting state")
+                await self._stop_proxy_poller()
+                self._last_polled_data = None
                 self._subscribed = False
                 self._authenticated = False
                 self._start_program_reply_received = False
@@ -539,6 +601,11 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Initial 4323 read (clear buffer): %s",
                     stale.hex() if stale else "empty",
                 )
+
+                # Start proxy poller if connected via proxy (notifications
+                # on 4325 are unreliable through ESPHome BT proxies)
+                if self.api.is_connected_via_proxy:
+                    await self._start_proxy_poller()
 
             # Step 2: Authenticate if needed
             if not self._authenticated:

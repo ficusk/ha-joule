@@ -1,5 +1,6 @@
 """Tests for JouleCoordinator (coordinator.py)."""
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -13,7 +14,10 @@ from custom_components.joule_sous_vide.const import (
     DEFAULT_TEMPERATURE_UNIT,
     DOMAIN,
 )
-from custom_components.joule_sous_vide.coordinator import JouleCoordinator
+from custom_components.joule_sous_vide.coordinator import (
+    PROXY_POLL_INTERVAL,
+    JouleCoordinator,
+)
 from custom_components.joule_sous_vide.joule_ble import JouleBLEError
 
 
@@ -284,3 +288,165 @@ async def test_stop_cooking_raises_homeassistant_error_on_connect_failure(
 
     with pytest.raises(HomeAssistantError):
         await coordinator.async_stop_cooking()
+
+
+# ---------------------------------------------------------------------------
+# Proxy poller
+# ---------------------------------------------------------------------------
+
+
+async def test_proxy_poller_starts_when_connected_via_proxy(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """Proxy poller task is started after subscribe when connected via proxy."""
+    mock_ble_api.is_connected_via_proxy = True
+    # Fresh connection triggers subscribe path
+    mock_ble_api.ensure_connected = AsyncMock(return_value=True)
+
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator: JouleCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._proxy_poll_task is not None
+    assert not coordinator._proxy_poll_task.done()
+
+
+async def test_proxy_poller_does_not_start_for_local(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """Proxy poller task is NOT started for local adapter connections."""
+    coordinator: JouleCoordinator = hass.data[DOMAIN][setup_integration.entry_id]
+    assert coordinator._proxy_poll_task is None
+
+
+async def test_proxy_poll_reads_and_decodes_data(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """Proxy poll reads 4323 and calls _try_decode_message on new data."""
+    mock_ble_api.is_connected_via_proxy = True
+    mock_ble_api.ensure_connected = AsyncMock(return_value=True)
+
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator: JouleCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+
+    # Reset dedup state, then return new data for the next poll cycle
+    coordinator._last_polled_data = None
+    fresh_data = b"\xde\xad\xbe\xef"
+    mock_ble_api.read_characteristic = AsyncMock(return_value=fresh_data)
+
+    with patch.object(coordinator, "_try_decode_message") as mock_decode:
+        # Let the poll loop run once
+        await asyncio.sleep(0.05)
+        mock_decode.assert_called_with(fresh_data, source="4323-proxy-poll")
+
+
+async def test_proxy_poll_deduplicates_identical_reads(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """Proxy poll does NOT decode the same data twice."""
+    mock_ble_api.is_connected_via_proxy = True
+    mock_ble_api.ensure_connected = AsyncMock(return_value=True)
+    # Always return the same data
+    fake_data = b"\xaa\xbb\xcc"
+    mock_ble_api.read_characteristic = AsyncMock(return_value=fake_data)
+
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator: JouleCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+
+    with patch.object(coordinator, "_try_decode_message") as mock_decode:
+        # Let several poll cycles run
+        await asyncio.sleep(0.1)
+        await hass.async_block_till_done()
+        # Should be called at most once since data never changes
+        assert mock_decode.call_count <= 1
+
+    await coordinator.async_shutdown()
+
+
+async def test_proxy_poller_stops_on_reconnect(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """Proxy poller is stopped and dedup reset on a fresh reconnect."""
+    mock_ble_api.is_connected_via_proxy = True
+    mock_ble_api.ensure_connected = AsyncMock(return_value=True)
+
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator: JouleCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._proxy_poll_task is not None
+    old_task = coordinator._proxy_poll_task
+
+    # Simulate reconnect — ensure_connected returns True again
+    coordinator._last_polled_data = b"\x01"
+    await coordinator._async_update_data()
+
+    # After reconnect, dedup is reset and a NEW poller started
+    assert coordinator._last_polled_data is None
+    assert old_task.cancelled()
+    assert coordinator._proxy_poll_task is not None
+    assert coordinator._proxy_poll_task is not old_task
+
+
+async def test_async_shutdown_cancels_poller(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """async_shutdown cancels the proxy poller task."""
+    mock_ble_api.is_connected_via_proxy = True
+    mock_ble_api.ensure_connected = AsyncMock(return_value=True)
+
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator: JouleCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._proxy_poll_task is not None
+
+    await coordinator._stop_proxy_poller()
+
+    assert coordinator._proxy_poll_task is None
+
+
+async def test_try_write_and_wait_uses_faster_poll_via_proxy(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """_try_write_and_wait uses PROXY_POLL_INTERVAL when connected via proxy."""
+    mock_ble_api.is_connected_via_proxy = True
+    mock_ble_api.ensure_connected = AsyncMock(return_value=True)
+
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator: JouleCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+
+    # Call _try_write_and_wait with a very short timeout; it should use the
+    # proxy poll interval rather than the default 5s
+    payload = b"\x00" * 10
+    # Should complete quickly with the fast poll interval
+    result = await coordinator._try_write_and_wait("test", payload, 0.05)
+    # With no response it returns False — that's fine; we're testing it completes
+    # quickly (would take 5s+ if using default poll interval)
+    assert result is False

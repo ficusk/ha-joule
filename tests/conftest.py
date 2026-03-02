@@ -47,6 +47,7 @@ def mock_ble_api():
         instance.sender_address = bytes.fromhex("aabbaabbaabbaabb")
         instance.recipient_address = bytes.fromhex("a0a3a8e5addc0102")
         instance.mtu_size = 23
+        instance.is_connected_via_proxy = False  # default: local adapter
         mock_cls.return_value = instance
         yield instance
 
@@ -61,6 +62,14 @@ def _fast_notification_timeout(monkeypatch: pytest.MonkeyPatch):
     """
     monkeypatch.setattr(JouleCoordinator, "NOTIFICATION_TIMEOUT", 0.01)
     monkeypatch.setattr(JouleCoordinator, "KEY_EXCHANGE_TIMEOUT", 0.01)
+
+
+@pytest.fixture(autouse=True)
+def _fast_proxy_poll(monkeypatch: pytest.MonkeyPatch):
+    """Use a very short proxy poll interval so tests don't block."""
+    import custom_components.joule_sous_vide.coordinator as coord_mod
+
+    monkeypatch.setattr(coord_mod, "PROXY_POLL_INTERVAL", 0.01)
 
 
 @pytest.fixture(autouse=True)
