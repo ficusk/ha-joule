@@ -555,7 +555,14 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_start_cooking(
         self, target_temperature: float, cook_time_minutes: float
     ) -> None:
-        """Send a protobuf StartProgramRequest to the device."""
+        """Send a protobuf StartProgramRequest to the device.
+
+        Matches the iOS app's structure exactly:
+        - Empty sender/recipient addresses
+        - CirculatorProgram with ProgramMetadata (random cookId UUID)
+        - feedId + sequenceNumber from the latest CirculatorDataPoint
+        - Single write (no dual-variant)
+        """
         self._target_temperature = target_temperature
         self._cook_time_minutes = cook_time_minutes
         try:
@@ -570,14 +577,13 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._latest_data_point is not None:
                 feed_id = self._latest_data_point.feed_id
                 seq_num = self._latest_data_point.sequence_number
-                _LOGGER.warning(
-                    "Using optimistic concurrency: feed_id=%d seq=%d",
-                    feed_id, seq_num,
-                )
+            _LOGGER.warning(
+                "StartProgramRequest: temp=%.1f°C cook_time=%ds "
+                "feed_id=%d seq=%d",
+                target_temperature, cook_time_seconds, feed_id, seq_num,
+            )
 
-            # Try empty addresses first (matches SubmitKeyRequest pattern
-            # that works), then full addresses as fallback.
-            payload_empty = build_start_cook_message(
+            payload = build_start_cook_message(
                 target_temperature,
                 cook_time_seconds,
                 sender=b"",
@@ -587,25 +593,10 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sequence_number=seq_num,
             )
             _LOGGER.warning(
-                "StartProgramRequest empty-addrs (%d bytes): %s",
-                len(payload_empty), payload_empty.hex(),
+                "StartProgramRequest (%d bytes): %s",
+                len(payload), payload.hex(),
             )
-            await self.api.write_message(payload_empty)
-
-            payload_full = build_start_cook_message(
-                target_temperature,
-                cook_time_seconds,
-                sender=self.api.sender_address,
-                recipient=self.api.recipient_address,
-                handle=self._session_handle,
-                feed_id=feed_id,
-                sequence_number=seq_num,
-            )
-            _LOGGER.warning(
-                "StartProgramRequest full-addrs (%d bytes): %s",
-                len(payload_full), payload_full.hex(),
-            )
-            await self.api.write_message(payload_full)
+            await self.api.write_message(payload)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to start cooking: {err}") from err
 
@@ -653,23 +644,25 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Send a protobuf StopCirculatorRequest to the device."""
         try:
             await self.api.ensure_connected()
-            payload_empty = build_stop_cook_message(
+
+            feed_id = 0
+            seq_num = 0
+            if self._latest_data_point is not None:
+                feed_id = self._latest_data_point.feed_id
+                seq_num = self._latest_data_point.sequence_number
+
+            payload = build_stop_cook_message(
                 sender=b"",
                 recipient=b"",
                 handle=self._session_handle,
+                feed_id=feed_id,
+                sequence_number=seq_num,
             )
             _LOGGER.warning(
-                "StopCirculatorRequest empty-addrs (%d bytes): %s",
-                len(payload_empty), payload_empty.hex(),
+                "StopCirculatorRequest (%d bytes): %s",
+                len(payload), payload.hex(),
             )
-            await self.api.write_message(payload_empty)
-
-            payload_full = build_stop_cook_message(
-                sender=self.api.sender_address,
-                recipient=self.api.recipient_address,
-                handle=self._session_handle,
-            )
-            await self.api.write_message(payload_full)
+            await self.api.write_message(payload)
         except JouleBLEError as err:
             raise HomeAssistantError(f"Failed to stop cooking: {err}") from err
 

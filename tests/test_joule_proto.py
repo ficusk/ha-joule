@@ -472,11 +472,19 @@ class TestBuildStartCookMessage:
                 break
         assert program_bytes is not None
 
-        # Verify set_point
+        # Verify set_point and structure (cook_time is NOT in CirculatorProgram
+        # — matching iOS app behavior; ProgramMetadata and field 7 are present)
         program_fields = decode_fields(program_bytes)
         program_map = {fn: (wt, v) for fn, wt, v in program_fields}
         assert struct.unpack("<f", program_map[1][1])[0] == pytest.approx(75.0)
-        assert program_map[2][1] == 5400
+        # cook_time is omitted from CirculatorProgram (iOS never sends it)
+        assert 2 not in program_map
+        # program_type (field 5) is always encoded
+        assert 5 in program_map
+        # ProgramMetadata (field 6) with cookId UUID is present
+        assert 6 in program_map
+        # field 7 = 0 (unknown purpose, iOS always sends it)
+        assert program_map[7][1] == 0
 
 
 class TestBuildStopCookMessage:

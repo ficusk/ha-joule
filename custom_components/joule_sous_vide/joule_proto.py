@@ -174,12 +174,20 @@ def decode_fields(data: bytes) -> list[tuple[int, int, Any]]:
 # Dataclasses
 # ---------------------------------------------------------------------------
 @dataclass
+class ProgramMetadata:
+    """Cook session metadata (embedded in CirculatorProgram field 6)."""
+
+    cook_id: str = ""  # field 4, string — random UUID identifying this cook session
+
+
+@dataclass
 class CirculatorProgram:
     """Cook program parameters."""
 
     set_point: float  # field 1, float — target temp in Celsius
     cook_time: int = 0  # field 2, uint32 — seconds (0 = unlimited)
     program_type: ProgramType = ProgramType.MANUAL  # field 5, enum
+    program_metadata: ProgramMetadata | None = None  # field 6, embedded message
 
 
 @dataclass
@@ -203,7 +211,10 @@ class Pong:
 
 @dataclass
 class StopCirculatorRequest:
-    """Stop the active cooking program (empty body)."""
+    """Stop the active cooking program."""
+
+    feed_id: int = 0  # field 2, uint32 — optimistic concurrency
+    sequence_number: int = 0  # field 3, uint32 — optimistic concurrency
 
 
 @dataclass
@@ -283,15 +294,35 @@ class StreamMessage:
 # ---------------------------------------------------------------------------
 # Encoding functions
 # ---------------------------------------------------------------------------
+def encode_program_metadata(metadata: ProgramMetadata) -> bytes:
+    """Encode a ProgramMetadata to protobuf bytes."""
+    result = b""
+    if metadata.cook_id:
+        result += encode_field_bytes(4, metadata.cook_id.encode("utf-8"))
+    return result
+
+
 def encode_circulator_program(program: CirculatorProgram) -> bytes:
-    """Encode a CirculatorProgram to protobuf bytes."""
+    """Encode a CirculatorProgram to protobuf bytes.
+
+    Matches the iOS app's field ordering: setPoint(1), programType(5),
+    programMetadata(6), then an extra field 7=0.  The iOS app does NOT
+    include cookTime(2) for MANUAL programs; we omit it too when zero.
+    """
     result = encode_field_float(1, program.set_point)
     if program.cook_time > 0:
         result += encode_field_varint(2, program.cook_time)
-    # Always encode program_type — the Joule's proto2 definition likely
-    # declares it as `required`. The iOS app always includes it (even when
-    # MANUAL=0). Omitting it causes nanopb to reject the message silently.
+    # Always encode program_type — the Joule's proto2 definition declares
+    # it as `required`. The iOS app always includes it (even when MANUAL=0).
     result += encode_field_varint(5, program.program_type)
+    # ProgramMetadata with a cook session UUID — the iOS app always sends
+    # this with a random cookId for each cook session.
+    if program.program_metadata is not None:
+        meta_bytes = encode_program_metadata(program.program_metadata)
+        result += encode_field_bytes(6, meta_bytes)
+    # Field 7 = 0: unknown purpose but the iOS app always includes it.
+    # It's not in the [redacted] proto but may be required by newer firmware.
+    result += encode_field_varint(7, 0)
     return result
 
 
@@ -309,9 +340,14 @@ def encode_start_program_request(request: StartProgramRequest) -> bytes:
     return result
 
 
-def encode_stop_circulator_request(_request: StopCirculatorRequest) -> bytes:
-    """Encode a StopCirculatorRequest (empty body)."""
-    return b""
+def encode_stop_circulator_request(request: StopCirculatorRequest) -> bytes:
+    """Encode a StopCirculatorRequest with optimistic concurrency."""
+    result = b""
+    if request.feed_id:
+        result += encode_field_varint(2, request.feed_id)
+    if request.sequence_number:
+        result += encode_field_varint(3, request.sequence_number)
+    return result
 
 
 def encode_identify_circulator_request(
@@ -503,11 +539,23 @@ def build_start_cook_message(
     feed_id: int = 0,
     sequence_number: int = 0,
 ) -> bytes:
-    """Build a serialized StreamMessage containing a StartProgramRequest."""
+    """Build a serialized StreamMessage containing a StartProgramRequest.
+
+    Matches the iOS app's structure: CirculatorProgram includes a
+    ProgramMetadata with a random cookId UUID, and does NOT include
+    cook_time (the iOS app never sends it for MANUAL programs).
+    """
+    import uuid
+
     program = CirculatorProgram(
         set_point=set_point_celsius,
-        cook_time=cook_time_seconds,
+        # cook_time omitted — the iOS app never includes it for MANUAL
+        # programs.  The timer is managed app-side or via the device's
+        # internal state once the cook starts.
         program_type=ProgramType.MANUAL,
+        program_metadata=ProgramMetadata(
+            cook_id=uuid.uuid4().hex,
+        ),
     )
     msg = StreamMessage(
         handle=handle,
@@ -526,13 +574,18 @@ def build_stop_cook_message(
     sender: bytes = _DEFAULT_ADDRESS,
     recipient: bytes = _DEFAULT_ADDRESS,
     handle: int = 0,
+    feed_id: int = 0,
+    sequence_number: int = 0,
 ) -> bytes:
     """Build a serialized StreamMessage containing a StopCirculatorRequest."""
     msg = StreamMessage(
         handle=handle,
         sender_address=sender,
         recipient_address=recipient,
-        stop_circulator_request=StopCirculatorRequest(),
+        stop_circulator_request=StopCirculatorRequest(
+            feed_id=feed_id,
+            sequence_number=sequence_number,
+        ),
     )
     return encode_stream_message(msg)
 
