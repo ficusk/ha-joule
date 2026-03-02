@@ -633,6 +633,29 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._start_program_reply_received = False
             self._start_program_reply_result = None
 
+            # Pre-cook: refresh the live feed session.
+            # The Joule's firmware returns CS_ERROR_TIMEOUT (result=13) if the
+            # live feed has expired (stops ~5s after a StopCirculator).  Sending
+            # BeginLiveFeed right before StartProgram ensures the feed session
+            # is active.  Wait briefly for fresh CirculatorDataPoint data so the
+            # optimistic-concurrency feed_id/seq are current.
+            livefeed_payload = build_live_feed_message(
+                sender=b"",
+                recipient=b"",
+                handle=self._new_handle(),
+            )
+            got_data = await self._try_write_and_wait(
+                "BeginLiveFeed-pre-cook", livefeed_payload, 3.0,
+            )
+            if got_data and self._latest_data_point is not None:
+                # Use fresh feed_id/seq from the renewed live feed
+                feed_id = self._latest_data_point.feed_id
+                seq_num = self._latest_data_point.sequence_number
+                _LOGGER.warning(
+                    "Refreshed feed: feed_id=%d seq=%d",
+                    feed_id, seq_num,
+                )
+
             # Pre-cook: IdentifyCirculatorRequest (iOS does this before cook)
             identify_payload = build_identify_circulator_message(
                 sender=b"",
