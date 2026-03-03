@@ -4,7 +4,7 @@ Control and monitor your **ChefSteps Joule** circulator directly from Home Assis
 
 ![Joule Sous Vide card](docs/images/card-screenshot.svg)
 
-> **Status: v0.6 — Functional.** The integration communicates with the Joule over BLE using [redacted] protobuf messages. Real-hardware validation is in progress. See [Known Limitations](#known-limitations).
+> **Status: v0.18.6 — Hardware-validated.** The integration communicates with the Joule over BLE using [redacted] protobuf messages, with application-level key exchange authentication and real-time temperature streaming. See [Known Limitations](#known-limitations) and the [Development History](#development-history) appendix.
 
 ---
 
@@ -57,8 +57,11 @@ Once set up, Home Assistant creates five entities for your Joule, all under a si
 1. Go to **Settings** → **Devices & Services** → **+ Add Integration**.
 2. Search for **Joule** and select **ChefSteps Joule Sous Vide**.
 3. Enter your Joule's Bluetooth MAC address (`AA:BB:CC:DD:EE:FF`) and click **Submit**.
+4. **First-time only:** A notification will appear asking you to press the physical button on top of the Joule within 60 seconds. This completes the application-level key exchange. The key is saved automatically — subsequent connections won't require the button press.
 
 > ✅ On success, a **"Joule AA:BB:CC:DD:EE:FF"** device appears with five entities ready to use.
+>
+> **Tip:** If you have a valid auth key from the official app, you can import it via **Settings > Devices > Joule > Configure** to skip the button press.
 
 ---
 
@@ -110,9 +113,12 @@ action:
 
 | Limitation | Details |
 |---|---|
-| **BLE protocol** | The protobuf message format is based on [redacted] of the [[redacted]](https://github.com/[redacted]/[redacted]) project. Commands may not work on all firmware versions. |
+| **BLE-only — no cloud** | The ChefSteps cloud is shutting down (March 2026). This integration communicates exclusively over Bluetooth. WiFi/cloud control is not supported. |
+| **First-time auth requires button press** | The Joule uses application-level key exchange, not OS-level BLE pairing. On first setup, the user must press the physical button on the Joule within 60 seconds. The key is persisted and reused automatically on reconnection. Alternatively, import a key via **Settings > Devices > Joule > Configure**. |
+| **BLE protocol** | The protobuf message format is [redacted] from [[redacted]](https://github.com/[redacted]/[redacted]) and iOS PacketLogger captures. Commands may not work on all firmware versions. |
 | **State polling delay** | Cooking state is read from the device every 30 seconds via `program_step`. Between polls, state may be stale if the Joule is controlled from the ChefSteps app. |
 | **One connection at a time** | Bluetooth only supports one active connection. Close the ChefSteps app before using this integration. |
+| **ESPHome proxy support** | ESPHome Bluetooth Proxies are supported but local adapters are preferred. When connected via proxy, the integration polls for data instead of relying on notifications. |
 
 ---
 
@@ -141,25 +147,14 @@ For full troubleshooting steps, see **[docs/troubleshooting.md](docs/troubleshoo
 
 ---
 
-## Road Map
+## Development History
 
-These are the next planned improvements, in priority order:
+This integration was built iteratively over 30+ releases and 70+ commits, [redacted] the Joule's BLE protocol from scratch. The journey included migrating BLE stacks, discovering an application-level key exchange, debugging MTU and protobuf encoding issues, and capturing the official iOS app's traffic with Apple's PacketLogger to find the final missing pieces.
 
-### ~~1 — Set a target temperature~~ ✅ Done
+For the full story, see:
 
-Two `number` entities — **Target Temperature** and **Cook Time** (0–1440 min) — let you set cooking parameters from the dashboard or an automation. When the Sous Vide switch is turned on it reads the current values and passes them to the device. A **Temperature Unit** `select` entity (default °F) controls whether the target temperature is displayed and entered in °F or °C; the device always receives °C internally. The unit preference is persisted to the config entry and survives Home Assistant restarts.
-
-### ~~2 — Custom Lovelace card~~ ✅ Done
-
-A `custom:joule-sous-vide-card` Lovelace card that shows current temperature, target temperature (with +/− steppers), cook time (with +/− steppers), a °F/°C unit toggle, and a Start/Stop button — all in one panel. The card is bundled with the integration and auto-registers as a frontend module via `add_extra_js_url` — no separate HACS Frontend download or manual resource registration needed. See [How To: Use the Custom Lovelace Card](docs/how-to-lovelace-card.md).
-
-### ~~3 — HACS integration and install workflow~~ ✅ Done
-
-Added `hacs.json`, a GitHub Actions release workflow (triggered by version tags, validates `manifest.json` version, publishes a zip as a GitHub Release), and a CI workflow that runs the test suite on every push. The integration can now be installed via HACS as a custom repository.
-
-### ~~4 — Real BLE UUIDs and protobuf message layer~~ ✅ Done
-
-Replaced placeholder BLE UUIDs with real values [redacted] from [[redacted]](https://github.com/[redacted]/[redacted]). Implemented a hand-rolled protobuf encoder/decoder in `joule_proto.py` (no external dependencies) covering `StartProgramRequest`, `StopCirculatorRequest`, `BeginLiveFeedRequest`, and `CirculatorDataPoint`. The coordinator now polls via `BeginLiveFeedRequest`, reads live temperature from `CirculatorDataPoint.bath_temp`, and derives cooking state from the device's `program_step` field.
+- **[[redacted] Journal](docs/[redacted]-journal.md)** — detailed chapter-by-chapter account of every BLE theory tested and ruled out
+- **[Blog Post: Two Bytes That Bricked My Sous Vide](docs/blog-post.md)** — narrative write-up of the debugging journey
 
 ---
 
