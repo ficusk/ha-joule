@@ -13,7 +13,7 @@
  *   entity_unit:         select.joule_sous_vide_temperature_unit
  */
 
-const CARD_VERSION = "0.7.1";
+const CARD_VERSION = "0.7.2";
 console.info(
   `%c JOULE-SOUS-VIDE-CARD %c v${CARD_VERSION} `,
   "color: white; background: #03a9f4; font-weight: bold; padding: 2px 6px; border-radius: 3px 0 0 3px;",
@@ -120,15 +120,25 @@ class JouleSousVideCard extends HTMLElement {
       !cookTimeState ||
       !unitState;
 
-    const isCooking = !unavailable && switchState.state === "on";
-    const currentTemp = unavailable
+    // Entities exist but report unavailable/unknown — Joule is off/disconnected
+    const disconnected =
+      !unavailable &&
+      ["unavailable", "unknown"].some(
+        (s) =>
+          switchState.state === s ||
+          currentTempState.state === s ||
+          targetTempState.state === s
+      );
+
+    const isCooking = !unavailable && !disconnected && switchState.state === "on";
+    const currentTemp = unavailable || disconnected
       ? "–"
       : parseFloat(currentTempState.state).toFixed(1);
-    const targetTemp = unavailable
+    const targetTemp = unavailable || disconnected
       ? "–"
       : parseFloat(targetTempState.state).toFixed(1);
-    const cookTime = unavailable ? 0 : parseFloat(cookTimeState.state);
-    const unit = unavailable
+    const cookTime = unavailable || disconnected ? 0 : parseFloat(cookTimeState.state);
+    const unit = unavailable || disconnected
       ? "°F"
       : unitState.state;
 
@@ -365,6 +375,12 @@ class JouleSousVideCard extends HTMLElement {
         ${
           unavailable
             ? `<p class="unavailable-msg">Device unavailable</p>`
+            : disconnected
+            ? `
+          <div class="temp-display">
+            <div class="current-temp-value" style="font-size:28px;color:var(--secondary-text)">Joule Disconnected</div>
+          </div>
+        `
             : `
           <div class="temp-display">
             <div class="current-temp-value">${currentTempDisplay}${unit}</div>
@@ -409,7 +425,7 @@ class JouleSousVideCard extends HTMLElement {
       </div>
     `;
 
-    if (unavailable) return;
+    if (unavailable || disconnected) return;
 
     // Wire up target temperature steppers
     this.shadowRoot
