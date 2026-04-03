@@ -163,3 +163,9 @@ For the full story, see:
 Issues and pull requests are welcome at [github.com/acato/ha-joule](https://github.com/acato/ha-joule).
 
 When reporting a bug, please include your Home Assistant version and the relevant log lines from `joule_sous_vide` (Settings → System → Logs).
+
+---
+
+## Disclaimer
+
+**Joule** and **ChefSteps** are trademarks of Breville Group Limited. **Home Assistant** is a trademark of the Open Home Foundation. This project is not affiliated with, endorsed by, or sponsored by Breville, ChefSteps, or the Open Home Foundation. All trademarks belong to their respective owners.
