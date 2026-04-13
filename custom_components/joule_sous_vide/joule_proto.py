@@ -1,8 +1,6 @@
 """Hand-rolled protobuf encoding/decoding for the ChefSteps Joule protocol.
 
 Only the message types used by this integration are implemented.
-Field numbers and types are [redacted] from the Joule Android app:
-https://github.com/[redacted]/[redacted]/blob/master/dist/protobuf-files/base.proto
 
 Wire format reference: https://protobuf.dev/programming-guides/encoding/
 """
@@ -348,7 +346,7 @@ def encode_circulator_program(program: CirculatorProgram) -> bytes:
         meta_bytes = encode_program_metadata(program.program_metadata)
         result += encode_field_bytes(6, meta_bytes)
     # Field 7 = 0: unknown purpose but the iOS app always includes it.
-    # It's not in the [redacted] proto but may be required by newer firmware.
+    # May be required by newer firmware.
     result += encode_field_varint(7, 0)
     return result
 
@@ -390,7 +388,7 @@ def encode_begin_live_feed_request(request: BeginLiveFeedRequest) -> bytes:
 
 
 def _random_handle() -> int:
-    """Generate a random session handle (matches [redacted] SDK behavior)."""
+    """Generate a random session handle for message correlation."""
     return random.randint(1, 2**31 - 1)
 
 
@@ -458,7 +456,7 @@ def decode_circulator_data_point(data: bytes) -> CirculatorDataPoint:
             point.time_remaining = value
         else:
             # Log unknown fields for diagnostics — the 98-byte responses have
-            # fields beyond what [redacted] documents (50-61 range observed)
+            # fields beyond the documented range (50-61 range observed)
             if wire_type == WIRETYPE_VARINT:
                 unknown_fields.append(f"f{field_number}:v={value}")
             elif wire_type == WIRETYPE_FIXED32:
@@ -664,9 +662,8 @@ def build_compact_start_cook_message(
     - feedId + sequenceNumber (optimistic concurrency, when non-zero)
 
     Fields omitted vs. full message:
-    - ProgramMetadata (field 6 of CirculatorProgram) — iOS-only, not in
-      [redacted] SDK proto
-    - field 7 = 0 — unknown purpose, not in [redacted] SDK proto
+    - ProgramMetadata (field 6 of CirculatorProgram) — iOS-only
+    - field 7 = 0 — unknown purpose
     - cook_time — iOS never sends it for MANUAL programs
     """
     # Build CirculatorProgram manually — just setPoint + programType

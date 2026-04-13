@@ -569,7 +569,7 @@ class TestBuildCompactStartCookMessage:
         assert 7 not in program_map
 
     def test_no_program_metadata(self):
-        """Compact message omits ProgramMetadata (iOS-only, not in [redacted] SDK)."""
+        """Compact message omits ProgramMetadata (iOS-only)."""
         data = build_compact_start_cook_message(60.0)
         fields = decode_fields(data)
         spr_bytes = next(v for fn, wt, v in fields if fn == 50)

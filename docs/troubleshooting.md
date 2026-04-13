@@ -84,8 +84,8 @@ Before diving in, run through this list:
 2. **The Joule is in a fault state.**
    Unplug the Joule for 10 seconds, plug it back in, and try again.
 
-3. **BLE protocol mismatch.**
-   The Bluetooth protocol is based on [redacted] and may not work on all Joule firmware versions. If control consistently fails, please [open an issue on GitHub](https://github.com/acato/ha-joule/issues) with your HA logs attached.
+3. **Firmware compatibility.**
+   The integration may not work on all Joule firmware versions. If control consistently fails, please [open an issue on GitHub](https://github.com/acato/ha-joule/issues) with your HA logs attached.
 
 ---
 

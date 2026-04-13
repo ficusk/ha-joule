@@ -43,7 +43,7 @@ _LOGGER = logging.getLogger(__name__)
 
 PROXY_POLL_INTERVAL: float = 1.0  # seconds between 4323 polls (proxy mode)
 
-# Result enum from [redacted] SDK base.proto
+# Result enum codes returned by the device
 _RESULT_NAMES: dict[int, str] = {
     0: "CS_SUCCESS",
     3: "CS_ERROR_INTERNAL",

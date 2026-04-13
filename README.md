@@ -1,10 +1,10 @@
 # ChefSteps Joule Sous Vide — Home Assistant Integration
 
-Control and monitor your **ChefSteps Joule** circulator directly from Home Assistant, without the ChefSteps app.
+Control and monitor your **ChefSteps Joule** circulator directly from Home Assistant, without the ChefSteps app. Built as an interoperability layer for users who own Joule hardware and need continued local control as the official cloud service is retired.
 
 ![Joule Sous Vide card](docs/images/card-screenshot.svg)
 
-> **Status: v0.18.6 — Hardware-validated.** The integration communicates with the Joule over BLE using [redacted] protobuf messages, with application-level key exchange authentication and real-time temperature streaming. See [Known Limitations](#known-limitations) and the [Development History](#development-history) appendix.
+> **Status: v0.18.6 — Hardware-validated.** The integration communicates with the Joule over BLE with application-level key exchange authentication and real-time temperature streaming. See [Known Limitations](#known-limitations).
 
 ---
 
@@ -60,8 +60,6 @@ Once set up, Home Assistant creates five entities for your Joule, all under a si
 4. **First-time only:** A notification will appear asking you to press the physical button on top of the Joule within 60 seconds. This completes the application-level key exchange. The key is saved automatically — subsequent connections won't require the button press.
 
 > ✅ On success, a **"Joule AA:BB:CC:DD:EE:FF"** device appears with five entities ready to use.
->
-> **Tip:** If you have a valid auth key from the official app, you can import it via **Settings > Devices > Joule > Configure** to skip the button press.
 
 ---
 
@@ -113,9 +111,9 @@ action:
 
 | Limitation | Details |
 |---|---|
-| **BLE-only — no cloud** | The ChefSteps cloud is shutting down (March 2026). This integration communicates exclusively over Bluetooth. WiFi/cloud control is not supported. |
-| **First-time auth requires button press** | The Joule uses application-level key exchange, not OS-level BLE pairing. On first setup, the user must press the physical button on the Joule within 60 seconds. The key is persisted and reused automatically on reconnection. Alternatively, import a key via **Settings > Devices > Joule > Configure**. |
-| **BLE protocol** | The protobuf message format is [redacted] from [[redacted]](https://github.com/[redacted]/[redacted]) and iOS PacketLogger captures. Commands may not work on all firmware versions. |
+| **BLE-only — no cloud** | This integration communicates exclusively over Bluetooth and requires no cloud connectivity. WiFi/cloud control is not supported. |
+| **First-time auth requires button press** | The Joule uses application-level key exchange, not OS-level BLE pairing. On first setup, the user must press the physical button on the Joule within 60 seconds. The key is persisted and reused automatically on reconnection. |
+| **BLE protocol** | The integration uses an independent BLE protocol implementation. Commands may not work on all firmware versions. |
 | **State polling delay** | Cooking state is read from the device every 30 seconds via `program_step`. Between polls, state may be stale if the Joule is controlled from the ChefSteps app. |
 | **One connection at a time** | Bluetooth only supports one active connection. Close the ChefSteps app before using this integration. |
 | **ESPHome proxy support** | ESPHome Bluetooth Proxies are supported but local adapters are preferred. When connected via proxy, the integration polls for data instead of relying on notifications. |
@@ -143,18 +141,6 @@ For full troubleshooting steps, see **[docs/troubleshooting.md](docs/troubleshoo
 - [How To: Use the Custom Lovelace Card](docs/how-to-lovelace-card.md)
 - [Entity Reference](docs/reference-entities.md)
 - [Troubleshooting](docs/troubleshooting.md)
-- [Advanced: Finding BLE UUIDs with nRF Connect](docs/how-to-find-uuids.md)
-
----
-
-## Development History
-
-This integration was built iteratively over 30+ releases and 70+ commits, [redacted] the Joule's BLE protocol from scratch. The journey included migrating BLE stacks, discovering an application-level key exchange, debugging MTU and protobuf encoding issues, and capturing the official iOS app's traffic with Apple's PacketLogger to find the final missing pieces.
-
-For the full story, see:
-
-- **[[redacted] Journal](docs/[redacted]-journal.md)** — detailed chapter-by-chapter account of every BLE theory tested and ruled out
-- **[Blog Post: Two Bytes That Bricked My Sous Vide](docs/blog-post.md)** — narrative write-up of the debugging journey
 
 ---
 

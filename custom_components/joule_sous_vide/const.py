@@ -32,8 +32,7 @@ STEP_COOK_TIME_MINUTES: Final = 1.0
 # Temperature unit preference
 DEFAULT_TEMPERATURE_UNIT: Final = "°F"
 
-# BLE GATT UUIDs — [redacted] from the Joule Android app
-# Source: https://github.com/[redacted]/[redacted]/blob/master/src/constants.ts
+# BLE GATT UUIDs for the Joule
 JOULE_SERVICE_UUID: Final = "700b4321-9836-4383-a2b2-31a9098d1473"
 WRITE_CHAR_UUID: Final = "700b4322-9836-4383-a2b2-31a9098d1473"
 READ_CHAR_UUID: Final = "700b4323-9836-4383-a2b2-31a9098d1473"
