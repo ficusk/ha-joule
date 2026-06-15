@@ -80,6 +80,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._latest_data_point: CirculatorDataPoint | None = None
         self._notification_received: asyncio.Event = asyncio.Event()
         self._subscribed: bool = False
+        self._notification_polling_only: bool = False
         self._authenticated: bool = False
         self._start_program_reply_received: bool = False
         self._start_program_reply_result: int | None = None
@@ -558,6 +559,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._stop_proxy_poller()
                 self._last_polled_data = None
                 self._subscribed = False
+                self._notification_polling_only = False
                 self._authenticated = False
                 self._start_program_reply_received = False
                 self._start_program_reply_result = None
@@ -578,13 +580,25 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if sc_ok:
                     await asyncio.sleep(0.5)
 
-                await self.api.subscribe(self._on_notification)
-                self._subscribed = True
-                _LOGGER.warning("Subscribed to 4325 notifications")
+                try:
+                    await self.api.subscribe(self._on_notification)
+                except JouleBLEError as err:
+                    _LOGGER.warning(
+                        "Could not subscribe to 4325 notifications; "
+                        "falling back to polling 4323: %s",
+                        err,
+                    )
+                    self._notification_polling_only = True
+                    await self._start_proxy_poller()
+                else:
+                    _LOGGER.warning("Subscribed to 4325 notifications")
 
-                # Verify CCCD was actually written
-                cccd_ok = await self.api.verify_and_enable_notifications()
-                _LOGGER.warning("CCCD verification: %s", "OK" if cccd_ok else "FAILED")
+                    # Verify CCCD was actually written
+                    cccd_ok = await self.api.verify_and_enable_notifications()
+                    _LOGGER.warning(
+                        "CCCD verification: %s", "OK" if cccd_ok else "FAILED"
+                    )
+                self._subscribed = True
 
                 # Log MTU after subscribe — start_notify may have triggered
                 # MTU exchange via AcquireNotify
@@ -604,7 +618,7 @@ class JouleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 # Start proxy poller if connected via proxy (notifications
                 # on 4325 are unreliable through ESPHome BT proxies)
-                if self.api.is_connected_via_proxy:
+                if self.api.is_connected_via_proxy and not self._notification_polling_only:
                     await self._start_proxy_poller()
 
             # Step 2: Authenticate if needed

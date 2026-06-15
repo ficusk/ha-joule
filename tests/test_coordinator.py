@@ -3,6 +3,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -81,6 +82,25 @@ async def test_update_data_raises_update_failed_on_connect_error(
 
     with pytest.raises(UpdateFailed):
         await coordinator._async_update_data()
+
+
+async def test_update_data_falls_back_to_polling_when_subscribe_fails(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_ble_api: MagicMock,
+) -> None:
+    """A 4325 notify subscription failure falls back to polling, not setup retry."""
+    mock_ble_api.subscribe.side_effect = JouleBLEError("notify unavailable")
+
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert mock_config_entry.state == ConfigEntryState.LOADED
+    coordinator: JouleCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator._subscribed is True
+    assert coordinator._notification_polling_only is True
+    assert coordinator._proxy_poll_task is not None
 
 
 async def test_initial_cooking_state_is_false(

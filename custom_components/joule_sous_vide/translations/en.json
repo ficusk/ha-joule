@@ -3,30 +3,62 @@
     "step": {
       "user": {
         "title": "Connect to Joule Sous Vide",
-        "description": "Enter the Bluetooth MAC address of your Joule device (e.g. AA:BB:CC:DD:EE:FF).",
+        "description": "Select a discovered Joule. If none are listed, enter the Bluetooth address manually.",
         "data": {
-          "mac_address": "MAC Address"
+          "mac_address": "Joule"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Add {name}?",
+        "description": "Home Assistant discovered this Joule over Bluetooth."
+      },
+      "breville": {
+        "title": "Import Auth Key from Breville+",
+        "description": "Enter Breville+ credentials to import the BLE auth key from your account. Credentials are used once and are not saved. Leave these fields empty to pair manually with the Joule button instead. The serial number is optional unless your account has multiple Joules.",
+        "data": {
+          "breville_email": "Breville+ Email",
+          "breville_password": "Breville+ Password",
+          "breville_serial_number": "Joule Serial Number (optional)"
         }
       }
     },
+    "flow_title": "{name}",
     "error": {
       "cannot_connect": "Failed to connect. Make sure the Joule is powered on and in Bluetooth range.",
+      "missing_breville_credentials": "Enter both Breville+ email and password, or leave both blank.",
+      "invalid_breville_auth": "Breville+ rejected those credentials.",
+      "breville_appliance_not_found": "Could not find a matching Joule in that Breville+ account. Enter the Joule serial number and try again.",
+      "breville_cloud_error": "Breville+ key import failed. Try again later.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This Joule device is already configured."
+      "already_configured": "This Joule device is already configured.",
+      "not_supported": "This Bluetooth device is not a Joule."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Joule Options",
-        "description": "Paste a BLE auth key, or enter Breville+ credentials to import the key from your account. Breville credentials are used once and are not saved.",
+        "menu_options": {
+          "breville": "Import auth key from Breville+",
+          "manual_key": "Paste auth key manually"
+        }
+      },
+      "breville": {
+        "title": "Import Auth Key from Breville+",
+        "description": "Enter Breville+ credentials to import the BLE auth key from your account. Credentials are used once and are not saved. The serial number is optional unless your account has multiple Joules.",
         "data": {
-          "ble_auth_key": "BLE Auth Key",
           "breville_email": "Breville+ Email",
           "breville_password": "Breville+ Password",
-          "breville_serial_number": "Joule Serial Number"
+          "breville_serial_number": "Joule Serial Number (optional)"
+        }
+      },
+      "manual_key": {
+        "title": "Manual Auth Key",
+        "description": "Paste a BLE auth key captured elsewhere. Leave empty to clear the saved key.",
+        "data": {
+          "ble_auth_key": "BLE Auth Key"
         }
       }
     },

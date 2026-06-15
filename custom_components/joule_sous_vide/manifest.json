@@ -1,6 +1,14 @@
 {
   "domain": "joule_sous_vide",
   "name": "ChefSteps Joule Sous Vide",
+  "bluetooth": [
+    {
+      "manufacturer_id": 345
+    },
+    {
+      "service_uuid": "700b4321-9836-4383-a2b2-31a9098d1473"
+    }
+  ],
   "after_dependencies": ["bluetooth"],
   "codeowners": ["@catomaior"],
   "config_flow": true,
