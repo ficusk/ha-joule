@@ -21,14 +21,21 @@
     "step": {
       "init": {
         "title": "Joule Options",
-        "description": "Paste a BLE auth key captured from the official app (hex string). Leave empty to clear.",
+        "description": "Paste a BLE auth key, or enter Breville+ credentials to import the key from your account. Breville credentials are used once and are not saved.",
         "data": {
-          "ble_auth_key": "BLE Auth Key"
+          "ble_auth_key": "BLE Auth Key",
+          "breville_email": "Breville+ Email",
+          "breville_password": "Breville+ Password",
+          "breville_serial_number": "Joule Serial Number"
         }
       }
     },
     "error": {
-      "invalid_auth_key": "Invalid hex string. The auth key must be a valid hexadecimal value."
+      "invalid_auth_key": "Invalid hex string. The auth key must be a valid hexadecimal value.",
+      "missing_breville_credentials": "Enter both Breville+ email and password, or leave both blank.",
+      "invalid_breville_auth": "Breville+ rejected those credentials.",
+      "breville_appliance_not_found": "Could not find a matching Joule in that Breville+ account. Enter the Joule serial number and try again.",
+      "breville_cloud_error": "Breville+ key import failed. Try again later."
     }
   }
 }

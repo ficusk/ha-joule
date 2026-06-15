@@ -68,6 +68,8 @@ class JouleBLEAPI:
                 if info.address.upper() == self.mac_address.upper():
                     if JOULE_MANUFACTURER_ID in info.manufacturer_data:
                         addr = bytes(info.manufacturer_data[JOULE_MANUFACTURER_ID])
+                        if len(addr) >= 8:
+                            addr = addr[-8:]
                         _LOGGER.warning(
                             "Circulator address from manufacturer data: %s (%d bytes)",
                             addr.hex(), len(addr),
@@ -139,7 +141,7 @@ class JouleBLEAPI:
             if JOULE_MANUFACTURER_ID in info.manufacturer_data:
                 addr = bytes(info.manufacturer_data[JOULE_MANUFACTURER_ID])
                 if len(addr) >= 8:
-                    self.recipient_address = addr[:8]
+                    self.recipient_address = addr[-8:]
                     _LOGGER.warning(
                         "Updated circulator address from %s: %s",
                         source, self.recipient_address.hex(),

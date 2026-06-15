@@ -6,7 +6,15 @@ from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.joule_sous_vide.const import CONF_MAC_ADDRESS, DOMAIN
+from custom_components.joule_sous_vide.breville_cloud import BrevilleCloudKey
+from custom_components.joule_sous_vide.const import (
+    CONF_BLE_AUTH_KEY,
+    CONF_BREVILLE_EMAIL,
+    CONF_BREVILLE_PASSWORD,
+    CONF_BREVILLE_SERIAL_NUMBER,
+    CONF_MAC_ADDRESS,
+    DOMAIN,
+)
 from custom_components.joule_sous_vide.joule_ble import JouleBLEError
 
 from .conftest import TEST_MAC
@@ -136,3 +144,83 @@ async def test_connect_and_disconnect_called_during_validation(
 
     instance.connect.assert_called_once()
     instance.disconnect.assert_called_once()
+
+
+async def test_options_imports_breville_cloud_auth_key(
+    hass: HomeAssistant,
+) -> None:
+    """Breville+ options import stores only the derived BLE auth key."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_MAC_ADDRESS: TEST_MAC},
+        entry_id="options_entry",
+        unique_id=TEST_MAC,
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.joule_sous_vide.config_flow.async_fetch_breville_ble_auth_key",
+            AsyncMock(
+                return_value=BrevilleCloudKey(
+                    auth_key=bytes.fromhex("25ea00112233445566778899aabb75a7"),
+                    circulator_id="c000004d93404f9e",
+                    serial_number="164213370",
+                    name="Jouletide",
+                )
+            ),
+        ) as mock_import,
+        patch(
+            "custom_components.joule_sous_vide.config_flow.JouleBLEAPI"
+        ) as mock_ble_cls,
+        patch(
+            "custom_components.joule_sous_vide.config_flow.async_get_clientsession"
+        ) as mock_session,
+    ):
+        mock_session.return_value = object()
+        mock_ble_cls.return_value.recipient_address = bytes.fromhex("c000004d93404f9e")
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_BLE_AUTH_KEY: "",
+                CONF_BREVILLE_EMAIL: "ficus@example.com",
+                CONF_BREVILLE_PASSWORD: "secret",
+                CONF_BREVILLE_SERIAL_NUMBER: "",
+            },
+        )
+
+    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BLE_AUTH_KEY] == "25ea00112233445566778899aabb75a7"
+    assert result["data"][CONF_BREVILLE_SERIAL_NUMBER] == "164213370"
+    assert CONF_BREVILLE_EMAIL not in result["data"]
+    assert CONF_BREVILLE_PASSWORD not in result["data"]
+    mock_import.assert_awaited_once()
+    assert mock_import.await_args.kwargs["circulator_id"] == "c000004d93404f9e"
+
+
+async def test_options_shows_error_for_incomplete_breville_credentials(
+    hass: HomeAssistant,
+) -> None:
+    """Both Breville+ email and password are required for cloud import."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_MAC_ADDRESS: TEST_MAC},
+        entry_id="options_entry",
+        unique_id=TEST_MAC,
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_BLE_AUTH_KEY: "",
+            CONF_BREVILLE_EMAIL: "ficus@example.com",
+            CONF_BREVILLE_PASSWORD: "",
+            CONF_BREVILLE_SERIAL_NUMBER: "",
+        },
+    )
+
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["errors"] == {"base": "missing_breville_credentials"}

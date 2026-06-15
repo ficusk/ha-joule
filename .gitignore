@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.uv-cache/
 
 # Test artifacts
 .coverage
@@ -20,3 +21,5 @@ htmlcov/
 .claude/
 .vs/
 CLAUDE.md
+.joule-ble.json
+.uv-tools/

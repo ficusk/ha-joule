@@ -8,6 +8,9 @@ DOMAIN: Final = "joule_sous_vide"
 # Configuration keys
 CONF_MAC_ADDRESS: Final = "mac_address"
 CONF_BLE_AUTH_KEY: Final = "ble_auth_key"
+CONF_BREVILLE_EMAIL: Final = "breville_email"
+CONF_BREVILLE_PASSWORD: Final = "breville_password"
+CONF_BREVILLE_SERIAL_NUMBER: Final = "breville_serial_number"
 
 # Defaults
 DEFAULT_TARGET_TEMPERATURE: Final = 60.0  # °C
